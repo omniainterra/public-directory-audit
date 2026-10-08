@@ -45,7 +45,7 @@ class FakeD1 {
    }
    if(sql===FIND_REPORT_SQL)return db.reports.get(args[0])||null;
    throw new Error('Unknown SQL '+sql);
-  }}};}
+  }}}};
  }
 }
 function environment(db=new FakeD1(),limit='2'){
