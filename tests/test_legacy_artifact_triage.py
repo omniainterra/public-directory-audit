@@ -27,10 +27,12 @@ class LegacyAuditTriageTests(unittest.TestCase):
         self.assertEqual(classify("GET_HTTP_404", False), (5, "UNAVAILABLE_SITE_HUMAN_REVIEW"))
         self.assertEqual(classify("GET_US_THREAT_BLOCKED", False)[0], 99)
         self.assertEqual(classify("US_SOLICITATION_PROHIBITED", False)[0], 99)
-        self.assertEqual(classify("SITE_FORM_ELIGIBLE_PRE_COMPLIANCE", True)[0], 99)
+        self.assertEqual(classify("SITE_FORM_ELIGIBLE_PRE_COMPLIANCE", True),
+                         (0, "PRECOMPLIANCE_INVENTORY_RECONCILIATION"))
         self.assertEqual(classify("SITE_FORM_ELIGIBLE_PRE_COMPLIANCE", False),
-                         (99, "ALREADY_PRECOMPLIANCE_CANDIDATE"))
-        self.assertEqual(classify("TERMINAL_RETRY_EXHAUSTED_GET_HTTP_503", False)[0], 99)
+                         (0, "PRECOMPLIANCE_INVENTORY_RECONCILIATION"))
+        self.assertEqual(classify("TERMINAL_RETRY_EXHAUSTED_GET_HTTP_503", False),
+                         (0, "RETRY_EXHAUSTED_HUMAN_REVIEW_ONLY"))
 
     def test_bad_hosts_are_never_queued(self):
         for h in ["localhost", "192.168.0.1", "127.0.0.1", "bad.local", "foo..bar", "a_b.test", "10.0.0.2", "host.internal", "127.1", "0x7f.0x0.0x0.0x1"]:
@@ -70,10 +72,8 @@ class LegacyAuditTriageTests(unittest.TestCase):
             ("GET_US_PRIVATE_ADDRESS_BLOCKED", False),
             ("US_SOLICITATION_PROHIBITED", False),
             ("US_AUTOMATION_PROHIBITED", False),
-            ("TERMINAL_RETRY_EXHAUSTED_GET_HTTP_503", False),
-            ("GET_HTTP_403", False),
-            ("SITE_FORM_ELIGIBLE_PRE_COMPLIANCE", True),
-            ("GET_US_DNS_ERROR", True),
+            ("GET_FINAL_URL_UNSAFE", False),
+            ("US_SOLICITATION_PROHIBITED", True),
         ]
         for status, already_eligible in blockers:
             for reverse in (False, True):
@@ -95,7 +95,8 @@ class LegacyAuditTriageTests(unittest.TestCase):
                  "normalizedDomain": "channel.example", "status": "CONTACT_CHANNEL_REVIEW"}]
         queue, _, _, _, _ = triage(rows, "CORE")
         self.assertEqual(queue[0]["queue_kind"], "CONTACT_CHANNEL_HUMAN_REVIEW")
-        self.assertNotIn("sendAuthorized", queue[0])
+        self.assertIs(queue[0]["sendAuthorized"], False)
+        self.assertIs(queue[0]["networkRecheckEligible"], False)
 
     def test_private_output_cannot_follow_symlinks_or_overwrite(self):
         with tempfile.TemporaryDirectory(prefix="audit-private-files-test-") as td:
@@ -256,7 +257,9 @@ class LegacyAuditTriageTests(unittest.TestCase):
                            "status": status}
                 rows = [soft, blocked] if reverse else [blocked, soft]
                 queue, groups, _, invalid, duplicates = triage(rows, "ALL")
-                self.assertEqual(queue, [], (status, reverse))
+                self.assertEqual(len(queue), 1, (status, reverse))
+                self.assertFalse(queue[0]["networkRecheckEligible"])
+                self.assertFalse(queue[0]["sendAuthorized"])
                 self.assertEqual(invalid, 0)
                 self.assertEqual(duplicates, 1)
                 self.assertEqual(sum(groups.values()), 1)
@@ -289,6 +292,57 @@ class LegacyAuditTriageTests(unittest.TestCase):
             with patch("triage_legacy_artifacts.MAX_ARCHIVE_ENTRIES", 1):
                 with self.assertRaisesRegex(ValueError, "ZIP_MEMBER_COUNT_TOO_LARGE"):
                     load_existing_inventory(p)
+
+
+    def test_unlisted_precompliance_is_not_lost(self):
+        row = {"targetTier": "CORE", "normalizedDomain": "alpha.example",
+               "status": "SITE_FORM_ELIGIBLE_PRE_COMPLIANCE"}
+        queue, *_ = triage([row], "CORE")
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue[0]["queue_kind"], "PRECOMPLIANCE_INVENTORY_RECONCILIATION")
+        self.assertIs(queue[0]["networkRecheckEligible"], False)
+        self.assertIs(queue[0]["sendAuthorized"], False)
+        already, *_ = triage([row], "CORE", {"alpha.example"})
+        self.assertEqual(already, [])
+
+    def test_historical_classification_signals_need_review_not_deletion(self):
+        for status in ("US_NONPROFIT", "US_RELIGIOUS_ORGANIZATION",
+                       "US_GOVERNMENT_OR_PUBLIC_BODY", "EXCLUDED_TARGET_INDUSTRY",
+                       "EXCLUDED_PORTAL", "UNRECOGNIZED_LEGACY_STATUS"):
+            queue, *_ = triage([{"targetTier": "CORE", "normalizedDomain": "alpha.example",
+                                 "status": status}], "CORE")
+            self.assertEqual(len(queue), 1, status)
+            self.assertFalse(queue[0]["networkRecheckEligible"])
+            self.assertFalse(queue[0]["sendAuthorized"])
+        gov, *_ = triage([{"targetTier": "CORE", "normalizedDomain": "agency.gov",
+                          "status": "US_GOVERNMENT_OR_PUBLIC_BODY"}], "CORE")
+        self.assertEqual(gov, [])
+
+    def test_access_denials_do_not_trigger_automatic_retry_or_permanent_deletion(self):
+        for status in ("GET_HTTP_401", "GET_HTTP_403", "GET_HTTP_410",
+                       "ACCESS_RESTRICTED", "GET_US_TOO_MANY_REDIRECTS",
+                       "TERMINAL_RETRY_EXHAUSTED_GET_HTTP_503"):
+            for reverse in (False, True):
+                uncertain = {"targetTier": "CORE", "normalizedDomain": "alpha.example",
+                             "status": status}
+                soft = {"targetTier": "NEAR_CORE", "normalizedDomain": "www.alpha.example",
+                        "status": "NO_GENERAL_FORM"}
+                rows = [uncertain, soft] if reverse else [soft, uncertain]
+                queue, *_ = triage(rows, "ALL")
+                self.assertEqual(len(queue), 1, status)
+                self.assertFalse(queue[0]["networkRecheckEligible"], status)
+                self.assertFalse(queue[0]["sendAuthorized"], status)
+
+    def test_confirmed_safety_barriers_still_override_recovery(self):
+        pre = {"targetTier": "CORE", "normalizedDomain": "alpha.example",
+               "status": "SITE_FORM_ELIGIBLE_PRE_COMPLIANCE"}
+        for status in ("GET_US_THREAT_BLOCKED", "GET_US_PRIVATE_ADDRESS_BLOCKED",
+                       "US_SOLICITATION_PROHIBITED", "US_AUTOMATION_PROHIBITED"):
+            bad = {"targetTier": "NEAR_CORE", "normalizedDomain": "www.alpha.example",
+                   "status": status}
+            for rows in ([bad, pre], [pre, bad]):
+                queue, *_ = triage(rows, "ALL")
+                self.assertEqual(queue, [])
 
 
 if __name__ == "__main__":
