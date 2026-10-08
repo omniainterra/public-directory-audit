@@ -41,47 +41,118 @@ async function getBounded(fetchImpl,url){
  for(const c of chunks){out.set(c,offset);offset+=c.byteLength;}
  return {status:'OK',body:new TextDecoder().decode(out)};
 }
-function robotsAllowed(text,path){
- let active=false,hasGroup=false,bestLength=-1,allow=true;
- for(const line of String(text).split(/\r?\n/)){
-  const m=/^(user-agent|disallow|allow):\s*(.*)$/i.exec(line.replace(/#.*/,'').trim());
-  if(!m)continue;
-  const key=m[1].toLowerCase(),v=m[2].trim();
-  if(key==='user-agent'){active=v==='*'||v.toLowerCase()==='publicdirectoryaudit-pilot/0.2';hasGroup=true;continue;}
-  if(!hasGroup||!active||!v)continue;
-  if(/[?$*]/.test(v))return false; // no remote regex execution, fail closed
-  if(path.startsWith(v)&&(v.length>bestLength||(v.length===bestLength&&key==='allow'))){
-   allow=key==='allow';bestLength=v.length;
+export function robotsAllowed(text,path,{userAgent='PublicDirectoryAudit-Pilot/0.2'}={}){
+  // Robots is not an outreach permission grant. Reject unknown syntax conservatively.
+  if(typeof text!=='string'||text.length>65536||typeof path!=='string'||!path.startsWith('/'))return false;
+  const ua=String(userAgent).toLowerCase();
+  const groups=[];
+  let agents=[],rules=[],seenRules=false;
+  function flush(){
+    if(agents.length)groups.push({agents:[...agents],rules:[...rules]});
+    agents=[];rules=[];seenRules=false;
   }
- }
- return allow;
+  for(const raw of text.split(/\r?\n/)){
+    const line=raw.replace(/#.*/,'').trim();
+    if(!line){
+      if(seenRules)flush();
+      continue;
+    }
+    const match=/^(user-agent|allow|disallow|crawl-delay):\s*(.*)$/i.exec(line);
+    if(!match)continue;
+    const kind=match[1].toLowerCase(),value=match[2].trim();
+    if(kind==='user-agent'){
+      if(seenRules)flush();
+      if(value)agents.push(value.toLowerCase());
+      continue;
+    }
+    if(!agents.length)continue;
+    seenRules=true;
+    // A positive crawl delay cannot safely be satisfied by this prototype's
+    // immediate page fetches. Fail closed rather than silently ignore it.
+    if(kind==='crawl-delay'){
+      if(!/^(?:0+(?:\.0+)?|[1-9]\d*(?:\.\d+)?)$/.test(value)||Number(value)>0){
+        rules.push({kind:'unsupported',value});
+      }
+      continue;
+    }
+    if(value)rules.push({kind,value});
+  }
+  flush();
+  let specificity=-1,selected=[];
+  for(const group of groups){
+    for(const token of group.agents){
+      const match=token==='*'||ua.startsWith(token);
+      if(!match)continue;
+      const score=token==='*'?0:token.length;
+      if(score>specificity){specificity=score;selected=[group];}
+      else if(score===specificity&&!selected.includes(group))selected.push(group);
+    }
+  }
+  if(specificity<0)return true;
+  let bestLength=-1,allowed=true;
+  for(const group of selected){
+    for(const rule of group.rules){
+      if(rule.kind==='unsupported'||/[*$?]/.test(rule.value))return false;
+      if(path.startsWith(rule.value)&&
+        (rule.value.length>bestLength||
+         (rule.value.length===bestLength&&rule.kind==='allow'))){
+        bestLength=rule.value.length;
+        allowed=rule.kind==='allow';
+      }
+    }
+  }
+  return allowed;
+}
+
+function attr(raw,name){
+  for(const m of String(raw).matchAll(/(?:^|\s)([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g)){
+    if(m[1].toLowerCase()===name)return m[2]??m[3]??m[4];
+  }
+  return null;
 }
 function formsAndLinks(html,page,host){
- if(/no\s+(?:commercial\s+)?solicitations?|unsolicited\s+marketing\s+prohibited|no\s+sales\s+pitches/i.test(html)){
-  return {status:'SOLICITATION_PROHIBITED',links:[]};
- }
- let manual=/(?:mailto:|forms\.gle|typeform\.com|jotform\.com|cf-turnstile|hcaptcha|g-recaptcha|hs-form-frame)/i.test(html);
- for(const form of html.matchAll(/<form\b([^>]*)>([\s\S]*?)<\/form>/gi)){
-  if(!/(?:type|name)=["']?(?:email|e-mail)/i.test(form[2])||!/<textarea\b/i.test(form[2]))continue;
-  const get=(name)=>new RegExp(name+'\\s*=\\s*["\x27]([^"\x27]*)["\x27]','i').exec(form[1])?.[1];
-  const method=(get('method')||'GET').toUpperCase();
-  let action;
-  try{action=new URL(get('action')||page.href,page.href);}catch{manual=true;continue;}
-  if(method!=='POST'||!validate(action.href,host)){manual=true;continue;}
-  const ctx=html.slice(Math.max(0,form.index-140),form.index)+' '+action.pathname;
-  if(/appointment|booking|recruitment|patient\s+intake|support\s+ticket/i.test(ctx)){manual=true;continue;}
-  return {status:'FORM_FOUND_RESEARCH_ONLY',links:[]};
- }
- const links=[];
- for(const m of html.matchAll(/<a\b[^>]*href=["']([^"']+)["'][^>]*>[\s\S]*?<\/a>/gi)){
-  let url;try{url=new URL(m[1],page.href);}catch{continue;}
-  if(!validate(url.href,host)||url.href===page.href)continue;
-  if(!/contact|get[- /]?in[- /]?touch|reach[- /]?out|enquir|inquir/i.test(m[0]+' '+url.pathname))continue;
-  if(!links.some(x=>x.href===url.href))links.push(url);
-  if(links.length>=2)break;
- }
- return {status:manual?'CONTACT_REQUIRES_MANUAL_REVIEW':'NO_CONTACT_DETECTED',links};
+  // Inspect visible wording only; escaped scripts are not evidence of permission.
+  const visible=html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi,' ')
+    .replace(/<!--[\s\S]*?-->/g,' ');
+  if(/no\s+(?:commercial\s+)?solicitations?|unsolicited\s+marketing\s+(?:is\s+)?prohibited|no\s+sales\s+pitches/i.test(visible)){
+    return {status:'SOLICITATION_PROHIBITED',links:[]};
+  }
+  let manual=/(?:mailto:|forms\.gle|typeform\.com|jotform\.com|cf-turnstile|hcaptcha|g-recaptcha|hs-form-frame)/i.test(visible);
+  for(const form of visible.matchAll(/<form\b([^>]*)>([\s\S]*?)<\/form>/gi)){
+    const fields=[...form[2].matchAll(/<(?:input|textarea)\b([^>]*)>/gi)]
+      .map(f=>['name','type','id','placeholder','aria-label'].map(k=>attr(f[1],k)||'').join(' '))
+      .join(' ');
+    if(!/(?:email|e-mail)/i.test(fields)||
+       !/(?:message|comment|question|inquiry|enquiry|details)/i.test(fields))continue;
+    if(/(?:captcha|data-sitekey|cf-turnstile|g-recaptcha|hcaptcha)/i.test(form[0])){
+      manual=true;continue;
+    }
+    const method=(attr(form[1],'method')||'GET').toUpperCase();
+    let action;
+    try{action=new URL(attr(form[1],'action')||page.href,page.href);}
+    catch{manual=true;continue;}
+    if(method!=='POST'||!validate(action.href,host)){manual=true;continue;}
+    const heading=visible.slice(Math.max(0,form.index-240),form.index)
+      .replace(/<[^>]*>/g,' ').toLowerCase();
+    const context=heading+' '+action.pathname.toLowerCase();
+    if(/appointment|booking|reservation|recruitment|job\s+application|patient\s+intake|support\s+ticket/i.test(context)){
+      manual=true;continue;
+    }
+    return {status:'FORM_FOUND_RESEARCH_ONLY',links:[]};
+  }
+  const links=[];
+  for(const m of visible.matchAll(/<a\b[^>]*href=["']([^"']+)["'][^>]*>[\s\S]*?<\/a>/gi)){
+    let url;
+    try{url=new URL(m[1],page.href);}catch{continue;}
+    if(!validate(url.href,host)||url.href===page.href)continue;
+    if(!/contact|get[- /]?in[- /]?touch|reach[- /]?out|enquir|inquir/i.test(m[0]+' '+url.pathname))continue;
+    if(!links.some(x=>x.href===url.href))links.push(url);
+    if(links.length>=2)break;
+  }
+  return {status:manual?'CONTACT_REQUIRES_MANUAL_REVIEW':'NO_CONTACT_DETECTED',links};
 }
+
 export async function auditAuthorizedSite({url,approvedHost,denylist=[],fetchImpl}={}){
  const host=String(approvedHost||'').toLowerCase();
  const initial=validate(url,host);
