@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {auditAuthorizedSite} from '../src/cloudflare-research-probe.mjs';
+import {auditAuthorizedSite,robotsAllowed} from '../src/cloudflare-research-probe.mjs';
 import worker from '../src/cloudflare-pilot.mjs';
 const origin='https://studio.example.com';
 const base={url:origin+'/',approvedHost:'studio.example.com'};
@@ -73,4 +73,56 @@ test('large response and redirect are never accepted',async()=>{
 test('public Worker has no arbitrary research route',async()=>{
  const r=await worker.fetch(new Request('https://pilot.example/scan?url=https://studio.example.com'));
  assert.equal(r.status,404);
+});
+
+test('specific robots agent supersedes wildcard allow, preventing forbidden page fetches',async()=>{
+  const robots='User-agent: *\nAllow: /private\n\nUser-agent: PublicDirectoryAudit-Pilot\nDisallow: /\n';
+  assert.equal(robotsAllowed(robots,'/private'),false);
+  const f=fake({[origin+'/robots.txt']:{body:robots}});
+  const probe=await auditAuthorizedSite({
+    url:origin+'/private',approvedHost:'studio.example.com',fetchImpl:f.fetchImpl
+  });
+  assert.equal(probe.status,'ROBOTS_DENIED');
+  assert.equal(f.visited.length,1);
+});
+test('specific robots allow can override wildcard denial without authorizing marketing',()=>{
+  const txt='User-agent: *\nDisallow: /\nUser-agent: PublicDirectoryAudit-Pilot\nAllow: /contact\n';
+  assert.equal(robotsAllowed(txt,'/contact'),true);
+  assert.equal(robotsAllowed(txt,'/anything'),true);
+  const txt2='User-agent: PublicDirectoryAudit-Pilot\nDisallow: /\nAllow: /contact\n';
+  assert.equal(robotsAllowed(txt2,'/contact'),true);
+  assert.equal(robotsAllowed(txt2,'/hidden'),false);
+});
+test('robots crawl delay or complex pattern fails closed in offline pilot',()=>{
+  assert.equal(robotsAllowed('User-agent: *\nCrawl-delay: 5\nAllow: /','/'),false);
+  assert.equal(robotsAllowed('User-agent: *\nDisallow: /*private','/public'),false);
+  assert.equal(robotsAllowed('User-agent: *\nAllow: /','/'),true);
+  assert.equal(robotsAllowed('User-agent: *\nDisallow: /','/x'),false);
+});
+test('captcha-bearing generic enquiry form is always manual review, not automatically detected as usable',async()=>{
+  const f=fake({
+    [origin+'/robots.txt']:{status:404},
+    [origin+'/']:{body:'<form action="/contact" method="POST"><input name="email" type="email"><textarea name="message"></textarea><div class="g-recaptcha"></div></form>'}
+  });
+  const res=await auditAuthorizedSite({...base,fetchImpl:f.fetchImpl});
+  assert.equal(res.status,'CONTACT_REQUIRES_MANUAL_REVIEW');
+  assert.equal(res.sendAuthorized,false);
+});
+test('forms with misleading data-action cannot masquerade as a same-host contact POST action',async()=>{
+  const f=fake({
+    [origin+'/robots.txt']:{status:404},
+    [origin+'/']:{body:'<form method="POST" data-action="/contact" action="https://thirdparty.example.net/receive"><input name="email"><textarea name="message"></textarea></form>'}
+  });
+  const res=await auditAuthorizedSite({...base,fetchImpl:f.fetchImpl});
+  assert.equal(res.status,'CONTACT_REQUIRES_MANUAL_REVIEW');
+});
+test('form field order and single-quoted HTML attributes still identify a read-only candidate',async()=>{
+  const f=fake({
+    [origin+'/robots.txt']:{status:404},
+    [origin+'/']:{body:'<form action="/contact" method="POST"><input name="email" type="email"><textarea name="message"></textarea></form>'}
+  });
+  const res=await auditAuthorizedSite({...base,fetchImpl:f.fetchImpl});
+  assert.equal(res.status,'FORM_FOUND_RESEARCH_ONLY');
+  assert.equal(res.sendAuthorized,false);
+  assert.equal(f.visited.every(x=>x.opts.method==='GET'),true);
 });
