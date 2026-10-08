@@ -52,7 +52,7 @@ test('live scanning cannot run without explicit isolated public-repository opt-i
   fs.copyFileSync(path.join(root,'examples/synthetic-candidates.jsonl'),path.join(dir,'examples/synthetic-candidates.jsonl'));
   const result=spawnSync(process.execPath,[path.join(root,'bin/pipeline.mjs'),
     '--mode','live','--input','examples/synthetic-candidates.jsonl','--output','sealed-report.json','--limit','10'],
-    {cwd:dir,encoding:'utf8',timeout:5000,env:{...process.env,ENABLE_NETWORK_AUDIT:'false'}});
+    {cwd:dir,encoding:'utf8',timeout:5000,env:{...process.env,ENABLE_NETWORK_AUDIT:'false',GITHUB_ACTIONS:'false'}});
   assert.notEqual(result.status,0);
   assert.match(result.stderr,/LIVE_AUDIT_NOT_APPROVED/);
   fs.rmSync(dir,{recursive:true,force:true});
@@ -74,6 +74,25 @@ test('approved live research still refuses to visit any website without an exter
     });
   assert.notEqual(result.status,0);
   assert.match(result.stderr,/LIVE_PUBLIC_KEY_NOT_CONFIGURED/);
+  assert.equal(fs.existsSync(path.join(dir,'sealed-report.json')),false);
+  fs.rmSync(dir,{recursive:true,force:true});
+});
+
+
+test('GitHub Actions cannot enable live crawling even if approval variables are supplied',()=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'public-directory-github-live-deny-'));
+  fs.writeFileSync(path.join(dir,'candidates.jsonl'),JSON.stringify({
+    id:'1',name:'Synthetic-only record',url:'https://example.com',source:'OVERTURE_PUBLIC'
+  })+'\n');
+  const result=spawnSync(process.execPath,[path.join(root,'bin/pipeline.mjs'),
+    '--mode','live','--input','candidates.jsonl','--output','sealed-report.json','--limit','10'],{
+      cwd:dir,encoding:'utf8',timeout:5000,env:{
+        ...process.env,GITHUB_ACTIONS:'true',ISOLATED_RESEARCH_APPROVED:'true',
+        AUDIT_APPROVAL_PHRASE:'I_APPROVE_PERMITTED_LINUX_RESEARCH'
+      }
+    });
+  assert.notEqual(result.status,0);
+  assert.match(result.stderr,/GITHUB_ACTIONS_LIVE_SCAN_DENIED/);
   assert.equal(fs.existsSync(path.join(dir,'sealed-report.json')),false);
   fs.rmSync(dir,{recursive:true,force:true});
 });
