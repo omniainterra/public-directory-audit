@@ -2,7 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {classifyContactHtml,linksOnSite,prohibitedSolicitation} from '../src/classify.mjs';
 import {auditOne,auditBatch} from '../src/audit.mjs';
+import {MANUAL_DENY_DOMAINS} from '../src/threats.mjs';
 
+const VALID_THREATS={
+ denylist:new Set([...MANUAL_DENY_DOMAINS,...Array.from({length:230},(_,i)=>'synthetic-'+i+'.example.org')]),
+ counts:{manual:MANUAL_DENY_DOMAINS.length,CERT_PL:115,PHISHING_DATABASE:115,URLHAUS:12},
+ checkedAt:new Date().toISOString()
+};
 const form='<h2>Contact the studio</h2><form method="POST" action="/send"><input type="email" name="email" /><textarea name="message"></textarea></form>';
 
 test('static first-party contact form detection is preliminary and never authorizes messaging',()=>{
@@ -35,7 +41,7 @@ test('an offline mocked audit checks robots, contact page and policy without sen
     throw new Error('Unexpected destination');
   };
   const record=await auditOne({id:'1',name:'Studio',url:'https://studio.org/',category:'yoga_studio',state:'CA',source:'OVERTURE_PUBLIC'},
-    {fetchImpl:fake,delayMs:0});
+    {fetchImpl:fake,delayMs:0,threatSnapshot:VALID_THREATS,denylist:VALID_THREATS.denylist});
   assert.equal(record.status,'PRELIMINARY_OWN_DOMAIN_CONTACT_FORM');
   assert.equal(record.sendAuthorized,false);
   assert.equal(record.formUrl,'https://studio.org/contact');
@@ -53,7 +59,7 @@ test('manual-review channels are not sent and duplicate domains are skipped',asy
     {id:'1',name:'A',url:'https://studio.org',source:'OVERTURE_PUBLIC'},
     {id:'2',name:'B',url:'http://www.studio.org',source:'OVERTURE_PUBLIC'}
   ];
-  const results=await auditBatch(rows,{fetchImpl:fake,max:25});
+  const results=await auditBatch(rows,{fetchImpl:fake,max:25,threatSnapshot:VALID_THREATS,denylist:VALID_THREATS.denylist});
   assert.equal(results.length,1);
   assert.equal(results[0].status,'CONTACT_CHANNEL_REQUIRES_MANUAL_REVIEW');
   assert.equal(results[0].sendAuthorized,false);
@@ -67,4 +73,24 @@ test('malformed contact-link URLs are skipped rather than aborting the entire pa
 test('script-injected imaginary forms are never treated as verified HTML forms',()=>{
   const fake='<script>const s=`<form method="POST" action="/send"><input name="email"><textarea name="message"></textarea></form>`;</script>';
   assert.notEqual(classifyContactHtml(fake,'https://studio.org/').status,'PRELIMINARY_OWN_DOMAIN_CONTACT_FORM');
+});
+
+test('auditOne refuses network even with a mocked transport if threat evidence is missing',async()=>{
+ let count=0;
+ const record=await auditOne(
+  {id:'t',name:'Mock',url:'https://studio.org/',source:'OVERTURE_PUBLIC'},
+  {fetchImpl:async()=>{count++;throw Error('should not fetch');}}
+ );
+ assert.equal(record.status,'THREAT_FEED_UNAVAILABLE');
+ assert.equal(record.sendAuthorized,false);
+ assert.equal(count,0);
+});
+test('auditOne refuses known malware-alert host with no network and without loaded threat data',async()=>{
+ let calls=0;
+ const result=await auditOne(
+  {id:'m',name:'Mock',url:'https://www.covencle.com/',source:'OVERTURE_PUBLIC'},
+  {fetchImpl:async()=>{calls++;throw Error('no calls permitted');}}
+ );
+ assert.equal(result.status,'THREAT_LISTED');
+ assert.equal(calls,0);
 });

@@ -19,3 +19,8 @@ replacement; refer to GitHub Actions Additional Product Terms.
 - Continuously monitor service/provider policies, traffic limits and data protection requirements.
 
 Live scanning is explicitly blocked when `GITHUB_ACTIONS=true` or on Windows.
+
+
+## Latest fail-closed threat screening
+
+The Node.js and Cloudflare research prototypes must be provided with independently validated threat intelligence from CERT.PL, Phishing Database and URLHaus, confirmed within the past 24 hours. Five endpoint-security-blocked domains are denied even when a caller passes an empty list. Missing or stale evidence prevents candidate website requests. These checks do not guarantee complete malware detection. An isolated, authorized Linux runtime is still required for any prospective live research.
