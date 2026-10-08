@@ -39,3 +39,19 @@ Overture Maps Places is published as public GeoParquet: <https://docs.overturema
 ## License
 
 No open-source license is granted by this repository. Public availability does not imply permission to reuse its code.
+
+## Reuse of historical audit checkpoints (offline only)
+
+The public source contains an **offline, no-network** checkpoint triage tool in
+`scripts/triage_legacy_artifacts.py`. It accepts a previously downloaded
+PRIVATE GitHub audit artifact ZIP and optionally the PRIVATE pre-compliance
+inventory artifact ZIP. The input files are never copied to this public repo.
+
+It produces a private-permission recheck queue, separated into human review,
+contact-method rechecks and network-transport rechecks; malicious/suppressed
+records remain excluded. Historical statuses and form existence do **not**
+authorize outreach, nor do they prove current website availability.
+
+Never invoke this script on an unverified Windows computer, inside GitHub
+Actions, or with its output path inside a public repository. Only the synthetic
+unit tests are run in the public CI.

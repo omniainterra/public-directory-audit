@@ -29,6 +29,8 @@ jobs:
           node-version: '22'
       - name: Offline unit and transport guard tests only
         run: node --test tests/*.test.mjs
+      - name: Offline legacy artifact triage tests (synthetic records only)
+        run: python3 -m unittest discover -s tests -p "test_legacy_*.py" -v
       - name: Offline encrypted fixture generation only
         run: node bin/pipeline.mjs --mode smoke --input examples/synthetic-candidates.jsonl --output sealed-report.json --limit 10
       - name: Verify plaintext input is never in the public artifact
