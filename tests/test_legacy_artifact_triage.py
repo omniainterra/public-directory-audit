@@ -291,5 +291,56 @@ class LegacyAuditTriageTests(unittest.TestCase):
                     load_existing_inventory(p)
 
 
+    def test_unlisted_precompliance_is_not_lost(self):
+        row = {"targetTier": "CORE", "normalizedDomain": "alpha.example",
+               "status": "SITE_FORM_ELIGIBLE_PRE_COMPLIANCE"}
+        queue, *_ = triage([row], "CORE")
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue[0]["queue_kind"], "PRECOMPLIANCE_INVENTORY_RECONCILIATION")
+        self.assertIs(queue[0]["networkRecheckEligible"], False)
+        self.assertIs(queue[0]["sendAuthorized"], False)
+        already, *_ = triage([row], "CORE", {"alpha.example"})
+        self.assertEqual(already, [])
+
+    def test_historical_classification_signals_need_review_not_deletion(self):
+        for status in ("US_NONPROFIT", "US_RELIGIOUS_ORGANIZATION",
+                       "US_GOVERNMENT_OR_PUBLIC_BODY", "EXCLUDED_TARGET_INDUSTRY",
+                       "EXCLUDED_PORTAL", "UNRECOGNIZED_LEGACY_STATUS"):
+            queue, *_ = triage([{"targetTier": "CORE", "normalizedDomain": "alpha.example",
+                                 "status": status}], "CORE")
+            self.assertEqual(len(queue), 1, status)
+            self.assertFalse(queue[0]["networkRecheckEligible"])
+            self.assertFalse(queue[0]["sendAuthorized"])
+        gov, *_ = triage([{"targetTier": "CORE", "normalizedDomain": "agency.gov",
+                          "status": "US_GOVERNMENT_OR_PUBLIC_BODY"}], "CORE")
+        self.assertEqual(gov, [])
+
+    def test_access_denials_do_not_trigger_automatic_retry_or_permanent_deletion(self):
+        for status in ("GET_HTTP_401", "GET_HTTP_403", "GET_HTTP_410",
+                       "ACCESS_RESTRICTED", "GET_US_TOO_MANY_REDIRECTS",
+                       "TERMINAL_RETRY_EXHAUSTED_GET_HTTP_503"):
+            for reverse in (False, True):
+                uncertain = {"targetTier": "CORE", "normalizedDomain": "alpha.example",
+                             "status": status}
+                soft = {"targetTier": "NEAR_CORE", "normalizedDomain": "www.alpha.example",
+                        "status": "NO_GENERAL_FORM"}
+                rows = [uncertain, soft] if reverse else [soft, uncertain]
+                queue, *_ = triage(rows, "ALL")
+                self.assertEqual(len(queue), 1, status)
+                self.assertFalse(queue[0]["networkRecheckEligible"], status)
+                self.assertFalse(queue[0]["sendAuthorized"], status)
+
+    def test_confirmed_safety_barriers_still_override_recovery(self):
+        pre = {"targetTier": "CORE", "normalizedDomain": "alpha.example",
+               "status": "SITE_FORM_ELIGIBLE_PRE_COMPLIANCE"}
+        for status in ("GET_US_THREAT_BLOCKED", "GET_US_PRIVATE_ADDRESS_BLOCKED",
+                       "US_SOLICITATION_PROHIBITED", "US_AUTOMATION_PROHIBITED"):
+            bad = {"targetTier": "NEAR_CORE", "normalizedDomain": "www.alpha.example",
+                   "status": status}
+            for rows in ([bad, pre], [pre, bad]):
+                queue, *_ = triage(rows, "ALL")
+                self.assertEqual(queue, [])
+
+
 if __name__ == "__main__":
     unittest.main()
