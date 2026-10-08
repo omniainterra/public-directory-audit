@@ -15,7 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-from triage_legacy_artifacts import canonical_host, classify, inspect_archive, load_existing_inventory, triage, write_private
+from triage_legacy_artifacts import canonical_host, classify, inspect_archive, load_existing_inventory, triage, write_private, combine_private_audits
 
 
 class LegacyAuditTriageTests(unittest.TestCase):
@@ -121,6 +121,60 @@ class LegacyAuditTriageTests(unittest.TestCase):
                         z.writestr("overture-us-core-full-audit-results.json", "[]")
             with self.assertRaisesRegex(ValueError, "DUPLICATE_AUDIT_ARCHIVE_MEMBER"):
                 inspect_archive(archive)
+
+    def test_cross_tier_threat_blocks_otherwise_recheckable_website(self):
+        sha = lambda value: hashlib.sha256(value.encode()).hexdigest()
+        archives = [
+            ([{"release": "2026-09-23.1", "targetTier": "CORE",
+               "normalizedDomain": "www.shared.example", "status": "NO_GENERAL_FORM"}],
+             "CORE", sha("core")),
+            ([{"release": "2026-09-23.1", "targetTier": "NEAR_CORE",
+               "normalizedDomain": "shared.example", "status": "GET_US_THREAT_BLOCKED"}],
+             "NEAR_CORE", sha("near")),
+            ([{"release": "2026-09-23.1", "targetTier": "ADJACENT",
+               "normalizedDomain": "unrelated.example", "status": "NEEDS_REVIEW"}],
+             "ADJACENT", sha("adjacent"))
+        ]
+        for order in (archives, list(reversed(archives))):
+            records, sources = combine_private_audits(order)
+            queue, groups, _, invalid, duplicates = triage(records, "ALL")
+            self.assertEqual(len(sources), 3)
+            self.assertEqual(len(queue), 1)
+            self.assertEqual(queue[0]["host"], "unrelated.example")
+            self.assertEqual(queue[0]["tier"], "ADJACENT")
+            self.assertEqual(groups["EXPLICITLY_RESTRICTED_OR_TERMINAL"], 1)
+            self.assertEqual(invalid, 0)
+            self.assertEqual(duplicates, 1)
+
+    def test_cross_tier_dedupe_is_stable_and_retains_source_tier(self):
+        sha = lambda value: hashlib.sha256(value.encode()).hexdigest()
+        archives = [
+            ([{"release": "2026-09-23.1", "normalizedDomain": "www.care.example",
+               "status": "GET_US_TIMEOUT"}], "ADJACENT", sha("adjacent")),
+            ([{"release": "2026-09-23.1", "normalizedDomain": "care.example",
+               "status": "NO_GENERAL_FORM"}], "NEAR_CORE", sha("near")),
+            ([{"release": "2026-09-23.1", "normalizedDomain": "already.example",
+               "status": "NEEDS_REVIEW"}], "CORE", sha("core"))
+        ]
+        for order in (archives, list(reversed(archives))):
+            records, _ = combine_private_audits(order)
+            queue, *_ = triage(records, "ALL", {"already.example"})
+            self.assertEqual(len(queue), 1)
+            self.assertEqual(queue[0]["host"], "care.example")
+            self.assertEqual(queue[0]["tier"], "NEAR_CORE")
+            self.assertEqual(queue[0]["queue_kind"], "EXTENDED_CONTACT_RECHECK")
+
+    def test_cross_tier_archive_input_rejects_conflicts_and_duplicates(self):
+        sha = hashlib.sha256(b"fixture").hexdigest()
+        with self.assertRaisesRegex(ValueError, "DUPLICATE_OR_INVALID_AUDIT_SOURCE"):
+            combine_private_audits([([], "CORE", sha), ([], "NEAR_CORE", sha)])
+        with self.assertRaisesRegex(ValueError, "TIER_CROSSING_AUDIT_RECORD"):
+            combine_private_audits([
+                ([{"targetTier": "CORE", "normalizedDomain": "safe.example"}],
+                 "ADJACENT", sha)
+            ])
+        with self.assertRaisesRegex(ValueError, "AUDIT_ARCHIVE_COUNT_UNSUPPORTED"):
+            combine_private_audits([])
 
     def test_public_actions_must_not_process_legacy_private_data(self):
         with tempfile.TemporaryDirectory(prefix="public-offline-deny-") as td:
