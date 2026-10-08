@@ -27,6 +27,8 @@ class LegacyAuditTriageTests(unittest.TestCase):
         self.assertEqual(classify("GET_US_THREAT_BLOCKED", False)[0], 99)
         self.assertEqual(classify("US_SOLICITATION_PROHIBITED", False)[0], 99)
         self.assertEqual(classify("SITE_FORM_ELIGIBLE_PRE_COMPLIANCE", True)[0], 99)
+        self.assertEqual(classify("SITE_FORM_ELIGIBLE_PRE_COMPLIANCE", False),
+                         (99, "ALREADY_PRECOMPLIANCE_CANDIDATE"))
         self.assertEqual(classify("TERMINAL_RETRY_EXHAUSTED_GET_HTTP_503", False)[0], 99)
 
     def test_bad_hosts_are_never_queued(self):
