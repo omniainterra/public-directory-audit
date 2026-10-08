@@ -27,10 +27,12 @@ class LegacyAuditTriageTests(unittest.TestCase):
         self.assertEqual(classify("GET_HTTP_404", False), (5, "UNAVAILABLE_SITE_HUMAN_REVIEW"))
         self.assertEqual(classify("GET_US_THREAT_BLOCKED", False)[0], 99)
         self.assertEqual(classify("US_SOLICITATION_PROHIBITED", False)[0], 99)
-        self.assertEqual(classify("SITE_FORM_ELIGIBLE_PRE_COMPLIANCE", True)[0], 99)
+        self.assertEqual(classify("SITE_FORM_ELIGIBLE_PRE_COMPLIANCE", True),
+                         (0, "PRECOMPLIANCE_INVENTORY_RECONCILIATION"))
         self.assertEqual(classify("SITE_FORM_ELIGIBLE_PRE_COMPLIANCE", False),
-                         (99, "ALREADY_PRECOMPLIANCE_CANDIDATE"))
-        self.assertEqual(classify("TERMINAL_RETRY_EXHAUSTED_GET_HTTP_503", False)[0], 99)
+                         (0, "PRECOMPLIANCE_INVENTORY_RECONCILIATION"))
+        self.assertEqual(classify("TERMINAL_RETRY_EXHAUSTED_GET_HTTP_503", False),
+                         (0, "RETRY_EXHAUSTED_HUMAN_REVIEW_ONLY"))
 
     def test_bad_hosts_are_never_queued(self):
         for h in ["localhost", "192.168.0.1", "127.0.0.1", "bad.local", "foo..bar", "a_b.test", "10.0.0.2", "host.internal", "127.1", "0x7f.0x0.0x0.0x1"]:
@@ -70,10 +72,8 @@ class LegacyAuditTriageTests(unittest.TestCase):
             ("GET_US_PRIVATE_ADDRESS_BLOCKED", False),
             ("US_SOLICITATION_PROHIBITED", False),
             ("US_AUTOMATION_PROHIBITED", False),
-            ("TERMINAL_RETRY_EXHAUSTED_GET_HTTP_503", False),
-            ("GET_HTTP_403", False),
-            ("SITE_FORM_ELIGIBLE_PRE_COMPLIANCE", True),
-            ("GET_US_DNS_ERROR", True),
+            ("GET_FINAL_URL_UNSAFE", False),
+            ("US_SOLICITATION_PROHIBITED", True),
         ]
         for status, already_eligible in blockers:
             for reverse in (False, True):
@@ -95,7 +95,8 @@ class LegacyAuditTriageTests(unittest.TestCase):
                  "normalizedDomain": "channel.example", "status": "CONTACT_CHANNEL_REVIEW"}]
         queue, _, _, _, _ = triage(rows, "CORE")
         self.assertEqual(queue[0]["queue_kind"], "CONTACT_CHANNEL_HUMAN_REVIEW")
-        self.assertNotIn("sendAuthorized", queue[0])
+        self.assertIs(queue[0]["sendAuthorized"], False)
+        self.assertIs(queue[0]["networkRecheckEligible"], False)
 
     def test_private_output_cannot_follow_symlinks_or_overwrite(self):
         with tempfile.TemporaryDirectory(prefix="audit-private-files-test-") as td:
@@ -256,7 +257,9 @@ class LegacyAuditTriageTests(unittest.TestCase):
                            "status": status}
                 rows = [soft, blocked] if reverse else [blocked, soft]
                 queue, groups, _, invalid, duplicates = triage(rows, "ALL")
-                self.assertEqual(queue, [], (status, reverse))
+                self.assertEqual(len(queue), 1, (status, reverse))
+                self.assertFalse(queue[0]["networkRecheckEligible"])
+                self.assertFalse(queue[0]["sendAuthorized"])
                 self.assertEqual(invalid, 0)
                 self.assertEqual(duplicates, 1)
                 self.assertEqual(sum(groups.values()), 1)
