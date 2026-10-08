@@ -183,7 +183,7 @@ class LegacyAuditTriageTests(unittest.TestCase):
             path = Path(td) / "inventory.zip"
             name = "us-precompliance-inventory-export.csv"
             meta_name = "us-precompliance-inventory-export-manifest.json"
-            data = b"normalized_domain\\nwww.studio.example\\n"
+            data = b"normalized_domain\nwww.studio.example\n"
             manifest = {"csvSha256": hashlib.sha256(data).hexdigest(),
                         "uniqueDomains": 1, "release": "2026-09-23.1"}
             with zipfile.ZipFile(path, "w") as z:
@@ -214,8 +214,8 @@ class LegacyAuditTriageTests(unittest.TestCase):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
                 with zipfile.ZipFile(p, "w") as z:
-                    z.writestr(name, "normalized_domain\\nexample.com\\n")
-                    z.writestr(name, "normalized_domain\\nsecond.example\\n")
+                    z.writestr(name, "normalized_domain\nexample.com\n")
+                    z.writestr(name, "normalized_domain\nsecond.example\n")
                     z.writestr(meta, "{}")
             with self.assertRaisesRegex(ValueError, "INVENTORY_EXPORT_OR_MANIFEST_DUPLICATE_OR_MISSING"):
                 load_existing_inventory(p)
