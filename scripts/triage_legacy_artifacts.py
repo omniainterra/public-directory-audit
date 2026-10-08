@@ -43,6 +43,17 @@ QUEUE_KIND = {
     "CAPTCHA_MANUAL_REVIEW": (3, "CAPTCHA_HUMAN_REVIEW_ONLY"),
     "GET_US_EXTERNAL_REDIRECT_BLOCKED": (4, "EXTERNAL_REDIRECT_HUMAN_REVIEW"),
     "GET_HTTP_404": (5, "UNAVAILABLE_SITE_HUMAN_REVIEW"),
+    # Historical labels created by regex heuristics are not proof of legal exclusion.
+    "US_NONPROFIT": (0, "ENTITY_CLASSIFICATION_HUMAN_REVIEW_ONLY"),
+    "US_RELIGIOUS_ORGANIZATION": (0, "ENTITY_CLASSIFICATION_HUMAN_REVIEW_ONLY"),
+    "US_GOVERNMENT_OR_PUBLIC_BODY": (0, "ENTITY_CLASSIFICATION_HUMAN_REVIEW_ONLY"),
+    "US_ENTITY_CLASSIFICATION_REVIEW": (0, "ENTITY_CLASSIFICATION_HUMAN_REVIEW_ONLY"),
+    "EXCLUDED_TARGET_INDUSTRY": (0, "TARGET_CLASSIFICATION_HUMAN_REVIEW_ONLY"),
+    "EXCLUDED_COMPETITOR": (0, "TARGET_CLASSIFICATION_HUMAN_REVIEW_ONLY"),
+    "EXCLUDED_PORTAL": (0, "TARGET_CLASSIFICATION_HUMAN_REVIEW_ONLY"),
+    "EXCLUDED_MAGAZINE_PUBLISHER": (0, "TARGET_CLASSIFICATION_HUMAN_REVIEW_ONLY"),
+    "GET_US_TOO_MANY_REDIRECTS": (0, "REDIRECT_LOOP_HUMAN_REVIEW_ONLY"),
+    "ACCESS_RESTRICTED": (0, "ACCESS_RESTRICTED_HUMAN_REVIEW_ONLY"),
 }
 NETWORK_RETRY = {
     "GET_Error", "GET_US_NETWORK_ERROR", "GET_US_DNS_ERROR", "GET_US_DNS_EMPTY",
@@ -53,20 +64,20 @@ NETWORK_RETRY = {
 PERMANENT_RESTRICTIONS = {
     "GET_US_THREAT_BLOCKED", "GET_US_PRIVATE_ADDRESS_BLOCKED",
     "US_SOLICITATION_PROHIBITED", "US_AUTOMATION_PROHIBITED",
-    "US_GOVERNMENT_OR_PUBLIC_BODY", "US_RELIGIOUS_ORGANIZATION",
-    "US_NONPROFIT", "EXCLUDED_TARGET_INDUSTRY", "EXCLUDED_COMPETITOR",
-    "EXCLUDED_PORTAL", "SOLICITATION_PROHIBITED", "AUTOMATION_PROHIBITED",
+    "SOLICITATION_PROHIBITED", "AUTOMATION_PROHIBITED",
     "GET_FINAL_URL_UNSAFE", "OUTREACH_DISCOVERY_WEBSITE_UNSAFE",
-    "GET_US_TOO_MANY_REDIRECTS", "ACCESS_RESTRICTED",
 }
 # Any explicit threat, suppression or prior confirmed candidature takes precedence
 # over older/staler, more permissive checkpoints for the same canonical host.
 HARD_VETO_LABELS = frozenset({
     "EXPLICITLY_RESTRICTED_OR_TERMINAL",
+    "OFFICIAL_GOVERNMENT_DOMAIN_EXCLUDED",
     "PRESENT_IN_EXISTING_INVENTORY",
-    "ALREADY_PRECOMPLIANCE_CANDIDATE",
-    "HTTP_PERMANENT_OR_POLICY_BLOCKED",
-    "NOT_QUEUED",  # Unknown historical outcome must never be overruled by another tier.
+})
+# This eligibility is for a separately owner-approved READ-ONLY inspection only,
+# not for an outbound submit and not authorization to start the network.
+NETWORK_RECHECK_LABELS = frozenset({
+    "EXTENDED_CONTACT_RECHECK", "TARGET_RELEVANCE_RECHECK", "SAFE_NETWORK_RECHECK"
 })
 RELEASE_RE = re.compile(r"^20\d{2}-\d{2}-\d{2}\.\d+$")
 
@@ -97,12 +108,19 @@ def canonical_host(record: dict) -> str | None:
 
 def classify(status: str, is_eligible: bool) -> tuple[int, str]:
     """No status here ever constitutes SEND/READY eligibility."""
-    if status in PERMANENT_RESTRICTIONS or status.startswith("TERMINAL_"):
+    if status in PERMANENT_RESTRICTIONS:
         return (99, "EXPLICITLY_RESTRICTED_OR_TERMINAL")
+    if status.startswith("TERMINAL_"):
+        # Retry exhaustion is a release-level observation, NOT proof of an
+        # illegal site. Clearly unsafe/policy-terminal statuses remain blocked.
+        if any(x in status for x in
+               ("THREAT", "PRIVATE_ADDRESS", "UNSAFE", "PROHIBITED", "SOLICITATION")):
+            return (99, "EXPLICITLY_RESTRICTED_OR_TERMINAL")
+        return (0, "RETRY_EXHAUSTED_HUMAN_REVIEW_ONLY")
     if is_eligible or status == "SITE_FORM_ELIGIBLE_PRE_COMPLIANCE":
-        # Older checkpoint formats did not always include the boolean flag.
-        # The explicit preliminary classification still vetoes automatic rechecking.
-        return (99, "ALREADY_PRECOMPLIANCE_CANDIDATE")
+        # A previously accepted form absent from current inventory must be
+        # reconciled manually; never silently disappear or become SEND_READY.
+        return (0, "PRECOMPLIANCE_INVENTORY_RECONCILIATION")
     if status in QUEUE_KIND:
         return QUEUE_KIND[status]
     if status in NETWORK_RETRY:
@@ -112,8 +130,8 @@ def classify(status: str, is_eligible: bool) -> tuple[int, str]:
         code = int(m[1])
         if code in (408, 425, 429) or 500 <= code <= 599:
             return (6, "SAFE_NETWORK_RECHECK")
-        return (99, "HTTP_PERMANENT_OR_POLICY_BLOCKED")
-    return (99, "NOT_QUEUED")
+        return (0, "HTTP_NONRETRYABLE_HUMAN_REVIEW_ONLY")
+    return (0, "UNKNOWN_STATUS_HUMAN_REVIEW_ONLY")
 
 
 
@@ -203,6 +221,24 @@ def load_existing_inventory(archive: Path | None) -> tuple[set[str], str | None]
     return hosts, digest
 
 
+def selection_rank(priority: int, label: str, row: dict) -> tuple:
+    """Deterministic cross-tier severity independent of archive order."""
+    if label == "EXPLICITLY_RESTRICTED_OR_TERMINAL":
+        band = 0
+    elif label == "OFFICIAL_GOVERNMENT_DOMAIN_EXCLUDED":
+        band = 1
+    elif label == "PRESENT_IN_EXISTING_INVENTORY":
+        band = 2
+    elif label == "PRECOMPLIANCE_INVENTORY_RECONCILIATION":
+        band = 3
+    elif label not in NETWORK_RECHECK_LABELS:
+        band = 4
+    else:
+        band = 5
+    return (band, priority, str(row.get("status") or ""),
+            str(row.get("targetTier") or ""), str(row.get("release") or ""))
+
+
 def triage(records: list[dict], tier: str, inventory_hosts: set[str] | None = None):
     inventory_hosts = inventory_hosts or set()
     seen: dict[str, tuple[int, str, dict]] = {}
@@ -220,16 +256,15 @@ def triage(records: list[dict], tier: str, inventory_hosts: set[str] | None = No
         status = str(row.get("status", "UNKNOWN"))
         statuses[status] += 1
         priority, label = classify(status, bool(row.get("siteFormEligiblePreCompliance")))
-        if host in inventory_hosts:
+        # .gov / .mil are restricted official TLDs; .us is NOT.
+        if host.endswith((".gov", ".mil")) and label != "EXPLICITLY_RESTRICTED_OR_TERMINAL":
+            priority, label = (99, "OFFICIAL_GOVERNMENT_DOMAIN_EXCLUDED")
+        elif host in inventory_hosts and label not in HARD_VETO_LABELS:
             priority, label = (99, "PRESENT_IN_EXISTING_INVENTORY")
         previous = seen.get(host)
         if previous:
             dropped_duplicate += 1
-            was_blocked = previous[1] in HARD_VETO_LABELS
-            is_blocked = label in HARD_VETO_LABELS
-            if was_blocked:
-                continue
-            if not is_blocked and priority >= previous[0]:
+            if selection_rank(*previous) <= selection_rank(priority, label, row):
                 continue
         seen[host] = (priority, label, row)
     groups = Counter(label for _, label, _ in seen.values())
@@ -242,6 +277,10 @@ def triage(records: list[dict], tier: str, inventory_hosts: set[str] | None = No
         queue.append({
             "priority": priority,
             "queue_kind": label,
+            # Review-only states are retained in the ledger, not discarded.
+            # NO label here constitutes live site-access or outbound approval.
+            "networkRecheckEligible": label in NETWORK_RECHECK_LABELS,
+            "sendAuthorized": False,
             "host": host,
             "https_origin": "https://" + host + "/",
             "previous_status": str(row.get("status", "")),
@@ -311,7 +350,8 @@ def cli() -> None:
     queue, categories, statuses, invalid, duplicates = triage(records, tier, previous)
     if any(not RELEASE_RE.fullmatch(str(row.get("release", ""))) for row in queue):
         raise ValueError("RELEASE_INVALID")
-    columns = ["priority", "queue_kind", "host", "https_origin", "previous_status", "tier", "release", "state", "taxonomy"]
+    columns = ["priority", "queue_kind", "networkRecheckEligible", "sendAuthorized", "host",
+               "https_origin", "previous_status", "tier", "release", "state", "taxonomy"]
     text = io.StringIO(newline="")
     writer = csv.DictWriter(text, fieldnames=columns, lineterminator="\n")
     writer.writeheader()
@@ -324,6 +364,9 @@ def cli() -> None:
         "previouslyConfirmedInventoryExcluded": len(previous),
         "duplicateAuditDomainRowsCollapsed": duplicates, "invalidAuditRows": invalid,
         "groupCounts": categories, "statusCounts": statuses,
+        "manualReviewOnlyDomains": sum(n for k, n in categories.items()
+                                       if k not in HARD_VETO_LABELS and k not in NETWORK_RECHECK_LABELS),
+        "sendAuthorizedDomains": 0,
         "sourceArtifactSha256": source_manifests[0]["artifactSha256"] if len(audits) == 1 else None,
         "sourceArtifacts": source_manifests, "inventoryCsvSha256": inventory_hash,
         "candidateWebsiteAccessPerformed": False, "outboundSubmissionPerformed": False,
