@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch
 import warnings
 from pathlib import Path
 
@@ -243,6 +244,51 @@ class LegacyAuditTriageTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("PUBLIC_GITHUB_ACTIONS_PRIVATE_DATA_PROCESSING_DENIED", result.stderr + result.stdout)
             self.assertFalse(out.exists())
+
+
+    def test_unknown_and_redirect_loop_are_cross_tier_vetoes(self):
+        for status in ("GET_US_TOO_MANY_REDIRECTS", "ACCESS_RESTRICTED",
+                       "UNKNOWN_FUTURE_STATUS"):
+            for reverse in (False, True):
+                soft = {"targetTier": "CORE", "normalizedDomain": "www.shared.example",
+                        "status": "NO_GENERAL_FORM"}
+                blocked = {"targetTier": "NEAR_CORE", "normalizedDomain": "shared.example",
+                           "status": status}
+                rows = [soft, blocked] if reverse else [blocked, soft]
+                queue, groups, _, invalid, duplicates = triage(rows, "ALL")
+                self.assertEqual(queue, [], (status, reverse))
+                self.assertEqual(invalid, 0)
+                self.assertEqual(duplicates, 1)
+                self.assertEqual(sum(groups.values()), 1)
+
+    def test_zip_container_and_member_count_are_bounded(self):
+        with tempfile.TemporaryDirectory(prefix="private-zip-cap-") as td:
+            p = Path(td) / "audit.zip"
+            with zipfile.ZipFile(p, "w") as z:
+                z.writestr("overture-us-core-full-audit-results.json", "[]")
+                z.writestr("ignored-metadata.txt", "synthetic")
+            with patch("triage_legacy_artifacts.MAX_ARCHIVE_BYTES", p.stat().st_size - 1):
+                with self.assertRaisesRegex(ValueError, "ZIP_CONTAINER_TOO_LARGE"):
+                    inspect_archive(p)
+            with patch("triage_legacy_artifacts.MAX_ARCHIVE_ENTRIES", 1):
+                with self.assertRaisesRegex(ValueError, "ZIP_MEMBER_COUNT_TOO_LARGE"):
+                    inspect_archive(p)
+            records, tier, digest = inspect_archive(p)
+            self.assertEqual((records, tier), ([], "CORE"))
+            self.assertEqual(digest, hashlib.sha256(p.read_bytes()).hexdigest())
+
+    def test_private_inventory_uses_same_container_guards(self):
+        with tempfile.TemporaryDirectory(prefix="private-inventory-zip-cap-") as td:
+            p = Path(td) / "inventory.zip"
+            with zipfile.ZipFile(p, "w") as z:
+                z.writestr("us-precompliance-inventory-export.csv", "normalized_domain\\nexample.com\\n")
+                z.writestr("us-precompliance-inventory-export-manifest.json", "{}")
+            with patch("triage_legacy_artifacts.MAX_ARCHIVE_BYTES", p.stat().st_size - 1):
+                with self.assertRaisesRegex(ValueError, "ZIP_CONTAINER_TOO_LARGE"):
+                    load_existing_inventory(p)
+            with patch("triage_legacy_artifacts.MAX_ARCHIVE_ENTRIES", 1):
+                with self.assertRaisesRegex(ValueError, "ZIP_MEMBER_COUNT_TOO_LARGE"):
+                    load_existing_inventory(p)
 
 
 if __name__ == "__main__":
