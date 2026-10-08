@@ -1,6 +1,6 @@
 -- Cloudflare D1 private ledger. Migration is NOT applied or deployed by public GitHub CI.
 -- DO NOT store prospect URLs, business names, plaintext pages, credentials or messages.
-PRAGMA foreign_keys = ON;
+-- D1 automatically enforces foreign keys on every query; this is not a mutable session setting.
 CREATE TABLE IF NOT EXISTS audit_reservations (
   request_id TEXT PRIMARY KEY NOT NULL CHECK(length(request_id)=36),
   day_utc TEXT NOT NULL CHECK(length(day_utc)=10),
