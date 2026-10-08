@@ -49,8 +49,8 @@ if(mode==='live'){
 }
 const inspected=mode==='smoke'?rows.map(r=>({id:r.id,status:'SYNTHETIC_OFFLINE_NO_SITE_CHECK',
   auditKind:AUDIT_KIND,sendAuthorized:false})):(await (async()=>{
-  const {denylist}=await loadThreats();
-  return auditBatch(rows,{denylist,max:limit});
+  const threatSnapshot=await loadThreats();
+  return auditBatch(rows,{denylist:threatSnapshot.denylist,threatSnapshot,max:limit});
 })());
 const counts={};for(const row of inspected)counts[row.status]=(counts[row.status]||0)+1;
 const report={version:1,runMode:mode,auditKind:AUDIT_KIND,sendAuthorized:false,

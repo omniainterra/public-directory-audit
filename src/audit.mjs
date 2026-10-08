@@ -1,3 +1,4 @@
+import {validThreatSnapshot} from './threats.mjs';
 import {parseCandidateUrl,isDeniedHost,sameHost,safeFetch} from './network.mjs';
 import {robotsPermit,checkRobots} from './robots.mjs';
 import {linksOnSite,classifyContactHtml} from './classify.mjs';
@@ -10,12 +11,14 @@ function safeRecord(row){
     category:String(row.category??'').slice(0,100),source:String(row.source??'').slice(0,40),
     auditKind:AUDIT_KIND,sendAuthorized:false};
 }
-export async function auditOne(row,{denylist=new Set(),fetchImpl=safeFetch,delayMs=1200}={}){
+export async function auditOne(row,{denylist=new Set(),threatSnapshot,fetchImpl=safeFetch,delayMs=1200}={}){
   const record=safeRecord(row),candidate=parseCandidateUrl(record.url);
   if(!candidate)return {...record,status:'SOURCE_URL_INVALID'};
   const host=candidate.hostname;
   record.url=candidate.href;
   if(isDeniedHost(host,denylist))return {...record,status:'THREAT_LISTED'};
+  if(!validThreatSnapshot(threatSnapshot)||threatSnapshot.denylist!==denylist)
+    return {...record,status:'THREAT_FEED_UNAVAILABLE'};
   const robots=await checkRobots(candidate.href,{denylist,safeFetchImpl:fetchImpl});
   if(!robots.allowed)return {...record,status:robots.reason};
   const seen=new Set();
@@ -52,7 +55,7 @@ export async function auditOne(row,{denylist=new Set(),fetchImpl=safeFetch,delay
     return {...record,status:other?.status??'NO_DETECTED_CONTACT_CHANNEL'};
   }catch{return {...record,status:'TECHNICAL_FAILURE_RETRY_LATER'};}
 }
-export async function auditBatch(rows,{denylist=new Set(),fetchImpl=safeFetch,max=25}={}){
+export async function auditBatch(rows,{denylist=new Set(),threatSnapshot,fetchImpl=safeFetch,max=25}={}){
   if(!Array.isArray(rows)||rows.length>max||max>50||max<1)throw new Error('BATCH_LIMIT');
   const out=[];
   const seen=new Set();
@@ -61,7 +64,7 @@ export async function auditBatch(rows,{denylist=new Set(),fetchImpl=safeFetch,ma
     const key=candidate?.hostname.replace(/^www\./,'')||null;
     if(key&&seen.has(key))continue;
     if(key)seen.add(key);
-    out.push(await auditOne(row,{denylist,fetchImpl}));
+    out.push(await auditOne(row,{denylist,threatSnapshot,fetchImpl}));
   }
   return out;
 }

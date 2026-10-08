@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {isNonPublicIp,parseCandidateUrl,isForbiddenHost,isDeniedHost,publicDns,sameHost,safeFetch} from '../src/network.mjs';
 import {robotsPermit,checkRobots} from '../src/robots.mjs';
+import {loadThreats,validThreatSnapshot,MANUAL_DENY_DOMAINS} from '../src/threats.mjs';
 
 test('non-public and reserved IP ranges are blocked without external requests',()=>{
   for(const ip of ['10.2.3.4','127.0.0.1','169.254.169.254','172.16.0.1','192.168.1.1',
@@ -50,4 +51,30 @@ test('robots.txt honors specific disallow and user-agent and fails closed on non
   assert.equal(requests,1);
   const absent=await checkRobots('https://studio.org/',{safeFetchImpl:async()=>({status:404,body:''})});
   assert.equal(absent.allowed,true);
+});
+
+test('Node HTTPS fetch never resolves arbitrary hosts if threat feeds are missing',async()=>{
+ let dnsCalls=0;
+ await assert.rejects(()=>safeFetch('https://studio.org/',{
+   denylist:new Set(),resolver:async()=>{dnsCalls++;return [{address:'1.1.1.1',family:4}];}
+ }),/THREAT_FEED_REQUIRED/);
+ assert.equal(dnsCalls,0);
+ for(const domain of ['roco2lab.com','www.covencle.com']){
+   await assert.rejects(()=>safeFetch('https://'+domain+'/',{denylist:new Set()}),/THREAT_LISTED/);
+ }
+});
+test('3 validated threat feeds return a fresh snapshot without real internet calls',async()=>{
+ const sourceCalls=[];
+ const fake=async url=>{
+   sourceCalls.push(url);
+   const lines=Array.from({length:url.includes('cert.pl')?110:url.includes('github')?120:20},
+      (_,i)=>'blocked-'+sourceCalls.length+'-'+i+'.example.org').join('\n');
+   return {ok:true,headers:{get:()=>String(lines.length)},body:null,text:async()=>lines};
+ };
+ const found=await loadThreats({fetchImpl:fake});
+ assert.equal(sourceCalls.length,3);
+ assert.equal(validThreatSnapshot(found),true);
+ assert.equal(MANUAL_DENY_DOMAINS.every(x=>found.denylist.has(x)),true);
+ assert.equal(validThreatSnapshot({...found,checkedAt:'2020-01-01T00:00:00Z'}),false);
+ assert.equal(validThreatSnapshot({...found,denylist:new Set([...found.denylist].filter(x=>x!=='roco2lab.com'))}),false);
 });
