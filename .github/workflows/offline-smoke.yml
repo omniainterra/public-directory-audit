@@ -1,0 +1,37 @@
+name: Offline source and security tests
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'bin/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'package.json'
+      - '.github/workflows/offline-smoke.yml'
+permissions:
+  contents: read
+concurrency:
+  group: public-directory-audit-smoke
+  cancel-in-progress: true
+jobs:
+  safe-offline-check:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Offline unit and transport guard tests only
+        run: node --test tests/*.test.mjs
+      - name: Offline encrypted fixture generation only
+        run: node bin/pipeline.mjs --mode smoke --input examples/synthetic-candidates.jsonl --output sealed-report.json --limit 10
+      - name: Verify plaintext input is never in the public artifact
+        run: |
+          node -e "const f=require('fs');const t=f.readFileSync('sealed-report.json','utf8');if(t.includes('Synthetic Example')||!t.includes('encryptedKey'))process.exit(1)"
+          rm -f sealed-report.json

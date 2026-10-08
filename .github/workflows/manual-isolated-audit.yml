@@ -1,0 +1,28 @@
+# Manual software QA only. No external business websites or public data collection.
+name: Manual offline research-software QA
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: public-directory-audit-manual-qa
+  cancel-in-progress: true
+jobs:
+  verify-software-offline:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run offline software tests, no website access
+        run: node --test tests/*.test.mjs
+      - name: Verify mock data encryption without publishing artifacts
+        run: |
+          node bin/pipeline.mjs --mode smoke --input examples/synthetic-candidates.jsonl --output sealed-report.json --limit 10
+          node -e "const f=require('fs');const t=f.readFileSync('sealed-report.json','utf8');if(t.includes('Synthetic Example')||!t.includes('encryptedKey'))process.exit(1)"
+          rm -f sealed-report.json
