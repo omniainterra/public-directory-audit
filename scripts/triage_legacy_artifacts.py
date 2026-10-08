@@ -27,6 +27,8 @@ from urllib.parse import urlsplit
 
 MAX_JSON_SIZE = 80 * 1024 * 1024
 MAX_CANDIDATES = 200_000
+MAX_ARCHIVE_BYTES = 160 * 1024 * 1024
+MAX_ARCHIVE_ENTRIES = 128
 SOURCES = {
     "CORE": "overture-us-core-full-audit-results.json",
     "NEAR_CORE": "overture-us-near-core-full-audit-results.json",
@@ -55,6 +57,7 @@ PERMANENT_RESTRICTIONS = {
     "US_NONPROFIT", "EXCLUDED_TARGET_INDUSTRY", "EXCLUDED_COMPETITOR",
     "EXCLUDED_PORTAL", "SOLICITATION_PROHIBITED", "AUTOMATION_PROHIBITED",
     "GET_FINAL_URL_UNSAFE", "OUTREACH_DISCOVERY_WEBSITE_UNSAFE",
+    "GET_US_TOO_MANY_REDIRECTS", "ACCESS_RESTRICTED",
 }
 # Any explicit threat, suppression or prior confirmed candidature takes precedence
 # over older/staler, more permissive checkpoints for the same canonical host.
@@ -63,6 +66,7 @@ HARD_VETO_LABELS = frozenset({
     "PRESENT_IN_EXISTING_INVENTORY",
     "ALREADY_PRECOMPLIANCE_CANDIDATE",
     "HTTP_PERMANENT_OR_POLICY_BLOCKED",
+    "NOT_QUEUED",  # Unknown historical outcome must never be overruled by another tier.
 })
 RELEASE_RE = re.compile(r"^20\d{2}-\d{2}-\d{2}\.\d+$")
 
@@ -112,8 +116,33 @@ def classify(status: str, is_eligible: bool) -> tuple[int, str]:
     return (99, "NOT_QUEUED")
 
 
+
+def open_bounded_zip(archive: Path) -> zipfile.ZipFile:
+    """Refuse excessive ZIP containers and member-count bombs before decoding."""
+    if archive.stat().st_size > MAX_ARCHIVE_BYTES:
+        raise ValueError("ZIP_CONTAINER_TOO_LARGE")
+    z = zipfile.ZipFile(archive)
+    if len(z.filelist) > MAX_ARCHIVE_ENTRIES:
+        z.close()
+        raise ValueError("ZIP_MEMBER_COUNT_TOO_LARGE")
+    return z
+
+
+def streamed_file_sha256(archive: Path) -> str:
+    """Avoid loading whole input archives into RAM merely to hash them."""
+    digest = hashlib.sha256()
+    size = 0
+    with archive.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            size += len(chunk)
+            if size > MAX_ARCHIVE_BYTES:
+                raise ValueError("ZIP_CONTAINER_TOO_LARGE")
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def inspect_archive(archive: Path) -> tuple[list[dict], str, str]:
-    with zipfile.ZipFile(archive) as z:
+    with open_bounded_zip(archive) as z:
         available = [(tier, name) for tier, name in SOURCES.items() if name in z.namelist()]
         if len(available) != 1:
             raise ValueError("EXPECTED_ONE_SUPPORTED_AUDIT_RESULT_FILE")
@@ -129,7 +158,7 @@ def inspect_archive(archive: Path) -> tuple[list[dict], str, str]:
         data = json.loads(z.read(member).decode("utf-8"))
     if not isinstance(data, list) or len(data) > MAX_CANDIDATES:
         raise ValueError("AUDIT_INPUT_COUNT_INVALID")
-    return data, tier, hashlib.sha256(archive.read_bytes()).hexdigest()
+    return data, tier, streamed_file_sha256(archive)
 
 
 def load_existing_inventory(archive: Path | None) -> tuple[set[str], str | None]:
@@ -137,7 +166,7 @@ def load_existing_inventory(archive: Path | None) -> tuple[set[str], str | None]
         return set(), None
     target = "us-precompliance-inventory-export.csv"
     manifest_name = "us-precompliance-inventory-export-manifest.json"
-    with zipfile.ZipFile(archive) as z:
+    with open_bounded_zip(archive) as z:
         if z.namelist().count(target) != 1 or z.namelist().count(manifest_name) != 1:
             raise ValueError("INVENTORY_EXPORT_OR_MANIFEST_DUPLICATE_OR_MISSING")
         data_info = z.getinfo(target)
