@@ -6,6 +6,8 @@
 
 // Cloudflare private ledger. NO outbound network or plaintext prospect storage.
 // This module is intentionally NOT imported by src/cloudflare-pilot.mjs.
+// Cloudflare private ledger. NO outbound network or plaintext prospect storage.
+// This module is intentionally NOT imported by src/cloudflare-pilot.mjs.
 export const RESERVE_SQL=[
   'INSERT INTO audit_reservations (request_id,day_utc,created_at_utc)',
   'SELECT ?,?,? WHERE',
@@ -114,6 +116,26 @@ function answer(status,code,extras={}){
     status,headers:HEADERS
   });
 }
+
+async function verifiedCloudflareAccess(context,env){
+  // ctx.access is authenticated by the Cloudflare edge when a Worker-level
+  // Access policy protects ALL production and preview URLs for this Worker.
+  // A request-supplied JWT/header is intentionally never trusted.
+  const access=context?.access;
+  if(!access||typeof access.getIdentity!=='function')return false;
+  const audience=env?.ACCESS_AUD;
+  const email=env?.ACCESS_ALLOWED_EMAIL;
+  if(typeof audience!=='string'||!/^[A-Za-z0-9_-]{10,128}$/.test(audience)||
+     access.aud!==audience||typeof email!=='string')return false;
+  const allowed=email.trim().toLowerCase();
+  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(allowed))return false;
+  try{
+    const identity=await access.getIdentity();
+    return typeof identity?.email==='string'&&
+      identity.email.trim().toLowerCase()===allowed;
+  }catch{return false;}
+}
+
 function ready(env){
   return env?.STORAGE_ONLY_ENABLED==='I_UNDERSTAND_PRIVATE_STORAGE_ONLY' &&
     env.DB?.prepare && typeof env.AUTH_TOKEN_SHA256==='string' &&
@@ -149,7 +171,7 @@ function exactKeys(v,keys){
   return !!v&&typeof v==='object'&&!Array.isArray(v)&&
     Object.keys(v).sort().join(',')===keys.slice().sort().join(',');
 }
-export async function handlePrivateStoreRequest(request,env,{now=()=>new Date()}={}){
+export async function handlePrivateStoreRequest(request,env,{now=()=>new Date(),context}={}){
   let u;
   try{u=new URL(request.url);}catch{return answer(400,'INVALID_URL');}
   if(u.search||u.hash)return answer(404,'NOT_FOUND');
@@ -159,6 +181,7 @@ export async function handlePrivateStoreRequest(request,env,{now=()=>new Date()}
     u.pathname.slice(PATH_ENVELOPES.length+1):null;
   const isGetEnvelope=id!==null&&validRequestId(id);
   if(!(isReserve||isPostEnvelope||isGetEnvelope))return answer(404,'NOT_FOUND');
+  if(!await verifiedCloudflareAccess(context,env))return answer(403,'CLOUDFLARE_ACCESS_REQUIRED');
   if(!ready(env))return answer(503,'PRIVATE_STORAGE_NOT_CONFIGURED');
   try{
     if(!await authenticateBearer(request,env.AUTH_TOKEN_SHA256))return answer(401,'UNAUTHORIZED');
@@ -186,7 +209,7 @@ export async function handlePrivateStoreRequest(request,env,{now=()=>new Date()}
 }
 // Health status is static and independent of the secrets or D1 contents.
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, context) {
     let u;
     try { u = new URL(request.url); }
     catch { return answer(400, 'INVALID_URL'); }
@@ -205,6 +228,6 @@ export default {
         headers: HEADERS
       });
     }
-    return handlePrivateStoreRequest(request, env);
+    return handlePrivateStoreRequest(request, env, {context});
   }
 };

@@ -1,10 +1,8 @@
-# Cloudflare private D1 gateway — NOT DEPLOYED
+# Cloudflare private D1 gateway — Access-gated code NOT YET DEPLOYED
 
 ## Security boundary
 
-The running Cloudflare Worker remains src/cloudflare-pilot.mjs and responds only to /health.
-The new modules src/cloudflare-private-gateway.mjs and src/cloudflare-private-ledger.mjs
-are NOT imported by the running Worker and are NOT configured in wrangler.jsonc.
+An independent storage-only Worker was manually deployed earlier, bound to an EU-jurisdiction D1 database, and configured with daily reservation limit 1. Its secret authentication settings remain incomplete. This upgraded Cloudflare Access double-gate source is **not yet deployed**. The public pilot remains a separate static health-only Worker. The modules are not configured for any Git auto-deployment.
 No web scraping, outbound form/email submission or actual lead ingestion is enabled.
 
 This is a prototype of a private encrypted-report ledger to be deployed only
@@ -15,7 +13,11 @@ after separate owner authorization and a Cloudflare D1 security review.
 - Create a **private D1 database** using the Cloudflare Workers Free account only.
 - Review migration migrations/0001_private_ledger.sql before a manual apply.
 - Bind that database as env.DB to an isolated, non-public test Worker.
-- Supply secrets through Cloudflare Secrets, never source code or GitHub commits:
+- **First, enable Cloudflare Access on the storage-only Worker for ALL traffic** (production and preview), not just previews. Restrict the allow policy to one explicit owner email; do not allow Everyone or a whole public email domain.
+- Cloudflare's built-in `ctx.access` must provide a trusted audience and email identity. The gateway refuses every storage route if Access is absent, misconfigured, or identifies another user/application.
+- Supply variables and secrets through Cloudflare Settings, never source code or GitHub commits:
+  - ACCESS_AUD: exact application audience value displayed by the Access policy (public identifier, not a token).
+  - ACCESS_ALLOWED_EMAIL: one approved owner mailbox (exact match, case-insensitive).
   - STORAGE_ONLY_ENABLED must equal I_UNDERSTAND_PRIVATE_STORAGE_ONLY.
   - AUTH_TOKEN_SHA256: SHA256 hex of a fresh random 256-bit or stronger bearer token.
   - PUBLIC_KEY_FINGERPRINT: lowercase SHA256 hex of an independently managed live RSA-3072 public key.
@@ -38,7 +40,7 @@ after separate owner authorization and a Cloudflare D1 security review.
 - Historical US audit ZIP archives must remain outside this public repo
   and should not be uploaded to Cloudflare before a private import plan is approved.
 - Public cloudflare-pilot.mjs does not have DB bindings and must stay unmodified.
-- D1 migrations, secrets, real research, Cloudflare deployments and live data
+- Access policies, live secrets, real research, Cloudflare deployments and live data
   operations each need explicit owner review first.
 - D1 Free plan limits are enforced, not a promise of unlimited commercial scraping.
 
