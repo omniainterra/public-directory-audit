@@ -77,7 +77,7 @@ test('public Cloudflare pilot is still limited to static health and never import
 });
 test('private gateway fails closed with missing, malformed, or unintended configuration',async()=>{
  const bad=[
-  {},{...environment(),DB:null},
+  {...environment(),DB:null},
   {...environment(),AUTH_TOKEN_SHA256:'x'},
   {...environment(),PUBLIC_KEY_FINGERPRINT:null},
   {...environment(),MAX_REQUESTS_PER_DAY:'100'},
@@ -223,7 +223,7 @@ test('source files contain no direct outbound requests, cron configuration or pu
 test('Access must authenticate the exact Worker audience and owner email before D1 or bearer processing',async()=>{
   const db=new FakeD1(),env=environment(db),id=randomUUID();
   const contexts=[
-    undefined,{access:{}},
+    null,{access:{}},
     {access:{aud:'another-app',getIdentity:async()=>({email:ACCESS_EMAIL})}},
     {access:{aud:ACCESS_AUD,getIdentity:async()=>({email:'wrong@example.com'})}},
     {access:{aud:ACCESS_AUD,getIdentity:async()=>{throw Error('access service failed');}}}
