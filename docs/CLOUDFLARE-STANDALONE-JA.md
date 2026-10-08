@@ -11,3 +11,14 @@
 **重要：Workers.dev のURLは公開されています。** このゲートウェイは非公開ソースとして扱えるものではなく、HTTPアクセスを認証で保護する設計です。実データは独立した秘密鍵による暗号化を前提とし、実際の安全性は本番環境で別途検証します。
 
 このコードは事業者サイトを取得しません。Cloudflare上の自動実行、外部サイト通信、データ移管も含まれません。現在の `public-directory-audit-pilot` を変更しないでください。
+
+
+## 必須追加認証：Cloudflare Access
+
+最新版では、クラウド側で検証済みの `ctx.access` が存在し、さらに `ACCESS_AUD` と `ACCESS_ALLOWED_EMAIL` が一致しなければ、データベースへの全アクセスを403で拒否します。
+
+Cloudflare Workers & Pages → 対象Worker → Access → 「Protect this Worker behind Access」から、**All traffic** を選択し、オーナーのメールアドレス１つだけを許可してください。全利用者許可、ドメイン全体許可は使用しないでください。
+
+Cloudflare Accessには無料プランがございますが、選択する契約が無料であることを画面で確認してから操作してください。Access設定が終わるまで、`STORAGE_ONLY_ENABLED`を追加しないでください。
+
+既存の旧版Workerは /internal が503を返します。こちらの改良版をデプロイすると、Access未構成時は403を返します。正常な安全動作です。

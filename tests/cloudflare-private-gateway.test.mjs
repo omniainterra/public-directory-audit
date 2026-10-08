@@ -11,6 +11,9 @@ const AUTH='a'.repeat(48)+'b'.repeat(4);
 const HASH=createHash('sha256').update(AUTH).digest('hex');
 const KEYID='f'.repeat(64);
 const TIME='2026-10-08T12:00:00.000Z';
+const ACCESS_AUD='cf-access-audience-id-for-test-0123456789';
+const ACCESS_EMAIL='owner@example.com';
+const ACCESS_CONTEXT={access:{aud:ACCESS_AUD,getIdentity:async()=>({email:ACCESS_EMAIL})}};
 function envelope(cipher='private ciphertext'){
  return {
   version:1,format:'RSA-3072-OAEP-SHA256+AES-256-GCM',keyId:KEYID,
@@ -50,7 +53,8 @@ class FakeD1 {
 }
 function environment(db=new FakeD1(),limit='2'){
  return {DB:db,STORAGE_ONLY_ENABLED:'I_UNDERSTAND_PRIVATE_STORAGE_ONLY',
-  AUTH_TOKEN_SHA256:HASH,PUBLIC_KEY_FINGERPRINT:KEYID,MAX_REQUESTS_PER_DAY:limit};
+  AUTH_TOKEN_SHA256:HASH,PUBLIC_KEY_FINGERPRINT:KEYID,MAX_REQUESTS_PER_DAY:limit,
+  ACCESS_AUD,ACCESS_ALLOWED_EMAIL:ACCESS_EMAIL};
 }
 function req(method,path,data,token=AUTH){
  const headers=token?{Authorization:'Bearer '+token}:{};
@@ -59,8 +63,8 @@ function req(method,path,data,token=AUTH){
  return new Request('https://pilot.example'+path,{method,headers,body});
 }
 const now=()=>new Date(TIME);
-async function invoke(env,method,path,data,token=AUTH){
- const response=await handlePrivateStoreRequest(req(method,path,data,token),env,{now});
+async function invoke(env,method,path,data,token=AUTH,context=ACCESS_CONTEXT){
+ const response=await handlePrivateStoreRequest(req(method,path,data,token),env,{now,context});
  return {response,result:await response.json()};
 }
 test('public Cloudflare pilot is still limited to static health and never imports private gateway',async()=>{
@@ -110,7 +114,7 @@ test('idempotent UUID cannot be reused on another day',async()=>{
  const env=environment(),id=randomUUID();
  assert.equal((await invoke(env,'POST','/internal/v1/reservations',{requestId:id})).response.status,201);
  const next=await handlePrivateStoreRequest(req('POST','/internal/v1/reservations',{requestId:id}),env,{
-  now:()=>new Date('2026-10-09T00:01:00.000Z')
+  now:()=>new Date('2026-10-09T00:01:00.000Z'),context:ACCESS_CONTEXT
  });
  assert.equal(next.status,409);assert.equal((await next.json()).code,'ID_REUSED_ANOTHER_DAY');
 });
@@ -165,7 +169,7 @@ test('strict body parsing rejects excess, malformed JSON, unexpected fields and 
  const noType=new Request('https://pilot.example/internal/v1/reservations',{
   method:'POST',headers:{authorization:'Bearer '+AUTH},body:'{"requestId":"'+id+'"}'
  });
- const result=await handlePrivateStoreRequest(noType,env,{now});
+ const result=await handlePrivateStoreRequest(noType,env,{now,context:ACCESS_CONTEXT});
  assert.equal(result.status,400);
  assert.equal(env.DB.slots.size,0);
 });
@@ -214,4 +218,24 @@ test('source files contain no direct outbound requests, cron configuration or pu
  assert.equal(config.main,'src/cloudflare-pilot.mjs');
  assert.equal(Object.hasOwn(config,'d1_databases'),false);
  assert.equal(Object.hasOwn(config,'triggers'),false);
+});
+
+test('Access must authenticate the exact Worker audience and owner email before D1 or bearer processing',async()=>{
+  const db=new FakeD1(),env=environment(db),id=randomUUID();
+  const contexts=[
+    undefined,{access:{}},
+    {access:{aud:'another-app',getIdentity:async()=>({email:ACCESS_EMAIL})}},
+    {access:{aud:ACCESS_AUD,getIdentity:async()=>({email:'wrong@example.com'})}},
+    {access:{aud:ACCESS_AUD,getIdentity:async()=>{throw Error('access service failed');}}}
+  ];
+  for(const context of contexts){
+    const res=await invoke(env,'POST','/internal/v1/reservations',{requestId:id},AUTH,context);
+    assert.equal(res.response.status,403);
+    assert.equal(res.result.code,'CLOUDFLARE_ACCESS_REQUIRED');
+  }
+  assert.equal(db.calls,0);
+  const tampered={...env,ACCESS_ALLOWED_EMAIL:'*'};
+  const res=await invoke(tampered,'POST','/internal/v1/reservations',{requestId:id});
+  assert.equal(res.response.status,403);
+  assert.equal(db.calls,0);
 });
