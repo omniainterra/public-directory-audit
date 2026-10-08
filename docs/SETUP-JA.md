@@ -29,3 +29,21 @@
 出力CSVは営業先を含み、**暗号化されていない非公開データ**です。公開GitHubへコミットしたり、GitHub Actionsの成果物にアップロードしたりしないでください。`GITHUB_ACTIONS=true` ではプログラムが起動を拒否します。危険なサイト・送信拒否サイトを自動再調査することもありません。
 
 この処理は「送信可能件数」を増やすものではなく、新方式による再調査の優先順位を決めるための準備です。
+## ３種類の過去監査を重複なしで統合する場合
+
+新しい方式では、CORE・NEAR_CORE・ADJACENT の３種類の監査成果物を**同時に読み込み**、全階層で同じドメインを１件にまとめます。
+
+```sh
+python3 scripts/triage_legacy_artifacts.py \
+  --audit-zip /safe/private/core.zip \
+  --audit-zip /safe/private/near-core.zip \
+  --audit-zip /safe/private/adjacent.zip \
+  --inventory-zip /safe/private/inventory.zip \
+  --private-out /safe/private/recheck
+```
+
+過去の記録のいずれかに危険サイト、送信拒否、明確な除外、永久エラー、すでに候補として登録済みという情報があれば、その他の再試行可能な記録より優先し、**自動再調査の一覧から除外**いたします。古い判定が後から現れても、危険判定を覆すことはありません。
+
+生成する `PRIVATE_RECHECK_QUEUE.csv` と `PRIVATE_RECHECK_SUMMARY.json` は安全な非公開環境に限って保存され、同名ファイルの意図しない上書きを拒否します。手元の未調査候補一覧とは別物です。この操作自体で通信や送信は行いません。
+
+単一階層の指定も引き続き可能です。公開GitHub上で実データを処理することは禁止しております。
