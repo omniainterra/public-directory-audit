@@ -155,7 +155,8 @@ def triage(records: list[dict], tier: str, inventory_hosts: set[str] | None = No
     statuses = Counter()
     dropped_invalid = dropped_duplicate = 0
     for row in records:
-        if not isinstance(row, dict) or row.get("targetTier") not in (tier, None):
+        allowed_tiers = ("CORE", "NEAR_CORE", "ADJACENT") if tier == "ALL" else (tier, None)
+        if not isinstance(row, dict) or row.get("targetTier") not in allowed_tiers:
             dropped_invalid += 1
             continue
         host = canonical_host(row)
@@ -190,13 +191,40 @@ def triage(records: list[dict], tier: str, inventory_hosts: set[str] | None = No
             "host": host,
             "https_origin": "https://" + host + "/",
             "previous_status": str(row.get("status", "")),
-            "tier": tier,
+            "tier": str(row.get("targetTier") or tier),
             "release": str(row.get("release", "")),
             "state": str(row.get("stateCode") or "")[:2],
             "taxonomy": str(row.get("taxonomyPrimary") or "")[:90],
         })
     queue.sort(key=lambda item: (item["priority"], item["tier"], item["host"]))
     return queue, dict(sorted(groups.items())), dict(sorted(statuses.items())), dropped_invalid, dropped_duplicate
+
+
+def combine_private_audits(archives: list[tuple[list[dict], str, str]]):
+    """Merge real source snapshots before triage so a cross-tier danger veto wins.
+
+    The full input remains local; only file hashes and counts are safe to report.
+    """
+    if not archives or len(archives) > 12:
+        raise ValueError("AUDIT_ARCHIVE_COUNT_UNSUPPORTED")
+    combined = []
+    manifests = []
+    hashes = set()
+    for records, tier, sha in archives:
+        if tier not in SOURCES or sha in hashes:
+            raise ValueError("DUPLICATE_OR_INVALID_AUDIT_SOURCE")
+        hashes.add(sha)
+        if len(combined) + len(records) > MAX_CANDIDATES:
+            raise ValueError("COMBINED_AUDIT_INPUT_TOO_LARGE")
+        for record in records:
+            if not isinstance(record, dict):
+                combined.append(record)
+                continue
+            if record.get("targetTier") not in (None, tier):
+                raise ValueError("TIER_CROSSING_AUDIT_RECORD")
+            combined.append({**record, "targetTier": tier})
+        manifests.append({"tier": tier, "artifactSha256": sha, "inputRecords": len(records)})
+    return combined, manifests
 
 
 def write_private(path: Path, content: str) -> None:
@@ -209,7 +237,8 @@ def write_private(path: Path, content: str) -> None:
 
 def cli() -> None:
     p = argparse.ArgumentParser(description="Offline legacy audit triage. NEVER a send-ready report.")
-    p.add_argument("--audit-zip", type=Path, required=True)
+    p.add_argument("--audit-zip", type=Path, action="append", required=True,
+                   help="Repeat for CORE, NEAR_CORE and ADJACENT snapshots.")
     p.add_argument("--inventory-zip", type=Path)
     p.add_argument("--private-out", type=Path, required=True)
     args = p.parse_args()
@@ -221,7 +250,9 @@ def cli() -> None:
         raise SystemExit("PRIVATE_OUTPUT_MUST_NOT_BE_UNDER_PUBLIC_REPOSITORY")
     out.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(out, 0o700)
-    records, tier, audit_hash = inspect_archive(args.audit_zip)
+    audits = [inspect_archive(p) for p in args.audit_zip]
+    records, source_manifests = combine_private_audits(audits)
+    tier = audits[0][1] if len(audits) == 1 else "ALL"
     previous, inventory_hash = load_existing_inventory(args.inventory_zip)
     queue, categories, statuses, invalid, duplicates = triage(records, tier, previous)
     if any(not RELEASE_RE.fullmatch(str(row.get("release", ""))) for row in queue):
@@ -239,7 +270,8 @@ def cli() -> None:
         "previouslyConfirmedInventoryExcluded": len(previous),
         "duplicateAuditDomainRowsCollapsed": duplicates, "invalidAuditRows": invalid,
         "groupCounts": categories, "statusCounts": statuses,
-        "sourceArtifactSha256": audit_hash, "inventoryCsvSha256": inventory_hash,
+        "sourceArtifactSha256": source_manifests[0]["artifactSha256"] if len(audits) == 1 else None,
+        "sourceArtifacts": source_manifests, "inventoryCsvSha256": inventory_hash,
         "candidateWebsiteAccessPerformed": False, "outboundSubmissionPerformed": False,
         "productionDatabaseWritePerformed": False, "openAiApiUsed": False, "paidApiUsed": False,
         "caution": "These are historical snapshots; recheck results may have changed. No candidate is approved for outreach.",
@@ -248,6 +280,7 @@ def cli() -> None:
     # No source URLs or hosts are ever printed in terminal logs.
     print(json.dumps({"event": "OFFLINE_US_AUDIT_TRIAGE", "inputRecords": len(records),
                       "uniqueQueueDomains": len(queue), "sourceTier": tier,
+                      "sourceArchiveCount": len(audits),
                       "privateFilesOnly": True, "sendAuthorized": False}))
 
 
