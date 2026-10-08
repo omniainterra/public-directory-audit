@@ -178,6 +178,59 @@ class LegacyAuditTriageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "AUDIT_ARCHIVE_COUNT_UNSUPPORTED"):
             combine_private_audits([])
 
+    def test_private_inventory_archive_requires_exact_manifest_and_schema(self):
+        with tempfile.TemporaryDirectory(prefix="inventory-sanity-fixture-") as td:
+            path = Path(td) / "inventory.zip"
+            name = "us-precompliance-inventory-export.csv"
+            meta_name = "us-precompliance-inventory-export-manifest.json"
+            data = b"normalized_domain\\nwww.studio.example\\n"
+            manifest = {"csvSha256": hashlib.sha256(data).hexdigest(),
+                        "uniqueDomains": 1, "release": "2026-09-23.1"}
+            with zipfile.ZipFile(path, "w") as z:
+                z.writestr(name, data)
+                z.writestr(meta_name, json.dumps(manifest))
+            hosts, digest = load_existing_inventory(path)
+            self.assertEqual(hosts, {"studio.example"})
+            self.assertEqual(digest, manifest["csvSha256"])
+            manifest["uniqueDomains"] = 2
+            with zipfile.ZipFile(path, "w") as z:
+                z.writestr(name, data)
+                z.writestr(meta_name, json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "INVENTORY_ROW_COUNT_MISMATCH"):
+                load_existing_inventory(path)
+            manifest["uniqueDomains"] = 1
+            manifest["release"] = "../unauthorized"
+            with zipfile.ZipFile(path, "w") as z:
+                z.writestr(name, data)
+                z.writestr(meta_name, json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "INVENTORY_MANIFEST_INVALID"):
+                load_existing_inventory(path)
+
+    def test_inventory_duplicate_zip_entry_refused(self):
+        with tempfile.TemporaryDirectory(prefix="inventory-duplicate-") as td:
+            p = Path(td) / "double.zip"
+            name = "us-precompliance-inventory-export.csv"
+            meta = "us-precompliance-inventory-export-manifest.json"
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                with zipfile.ZipFile(p, "w") as z:
+                    z.writestr(name, "normalized_domain\\nexample.com\\n")
+                    z.writestr(name, "normalized_domain\\nsecond.example\\n")
+                    z.writestr(meta, "{}")
+            with self.assertRaisesRegex(ValueError, "INVENTORY_EXPORT_OR_MANIFEST_DUPLICATE_OR_MISSING"):
+                load_existing_inventory(p)
+
+    def test_inventory_declared_oversize_blocked_before_decompression(self):
+        with tempfile.TemporaryDirectory(prefix="inventory-zipbomb-") as td:
+            p = Path(td) / "large.zip"
+            name = "us-precompliance-inventory-export.csv"
+            meta = "us-precompliance-inventory-export-manifest.json"
+            with zipfile.ZipFile(p, "w", compression=zipfile.ZIP_DEFLATED) as z:
+                z.writestr(name, b"x" * (32 * 1024 * 1024 + 1))
+                z.writestr(meta, "{}")
+            with self.assertRaisesRegex(ValueError, "INVENTORY_ARCHIVE_SIZE_INVALID"):
+                load_existing_inventory(p)
+
     def test_public_actions_must_not_process_legacy_private_data(self):
         with tempfile.TemporaryDirectory(prefix="public-offline-deny-") as td:
             p = Path(td) / "input.zip"
