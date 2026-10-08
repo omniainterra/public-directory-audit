@@ -34,6 +34,7 @@ SOURCES = {
 }
 QUEUE_KIND = {
     "NEEDS_REVIEW": (0, "FORM_PURPOSE_REVIEW"),
+    "CONTACT_CHANNEL_REVIEW": (0, "CONTACT_CHANNEL_HUMAN_REVIEW"),
     "WRONG_FORM_PURPOSE": (0, "FORM_PURPOSE_REVIEW"),
     "NO_GENERAL_FORM": (1, "EXTENDED_CONTACT_RECHECK"),
     "NOT_RELEVANT_ENGLISH_EVIDENCE": (2, "TARGET_RELEVANCE_RECHECK"),
@@ -55,6 +56,14 @@ PERMANENT_RESTRICTIONS = {
     "EXCLUDED_PORTAL", "SOLICITATION_PROHIBITED", "AUTOMATION_PROHIBITED",
     "GET_FINAL_URL_UNSAFE", "OUTREACH_DISCOVERY_WEBSITE_UNSAFE",
 }
+# Any explicit threat, suppression or prior confirmed candidature takes precedence
+# over older/staler, more permissive checkpoints for the same canonical host.
+HARD_VETO_LABELS = frozenset({
+    "EXPLICITLY_RESTRICTED_OR_TERMINAL",
+    "PRESENT_IN_EXISTING_INVENTORY",
+    "ALREADY_PRECOMPLIANCE_CANDIDATE",
+    "HTTP_PERMANENT_OR_POLICY_BLOCKED",
+})
 RELEASE_RE = re.compile(r"^20\d{2}-\d{2}-\d{2}\.\d+$")
 
 
@@ -84,10 +93,10 @@ def canonical_host(record: dict) -> str | None:
 
 def classify(status: str, is_eligible: bool) -> tuple[int, str]:
     """No status here ever constitutes SEND/READY eligibility."""
-    if is_eligible and status == "SITE_FORM_ELIGIBLE_PRE_COMPLIANCE":
-        return (99, "ALREADY_PRECOMPLIANCE_CANDIDATE")
     if status in PERMANENT_RESTRICTIONS or status.startswith("TERMINAL_"):
         return (99, "EXPLICITLY_RESTRICTED_OR_TERMINAL")
+    if is_eligible:
+        return (99, "ALREADY_PRECOMPLIANCE_CANDIDATE")
     if status in QUEUE_KIND:
         return QUEUE_KIND[status]
     if status in NETWORK_RETRY:
@@ -108,8 +117,13 @@ def inspect_archive(archive: Path) -> tuple[list[dict], str, str]:
             raise ValueError("EXPECTED_ONE_SUPPORTED_AUDIT_RESULT_FILE")
         tier, member = available[0]
         info = z.getinfo(member)
-        if info.file_size > MAX_JSON_SIZE:
+        if z.namelist().count(member) != 1:
+            raise ValueError("DUPLICATE_AUDIT_ARCHIVE_MEMBER")
+        if info.file_size > MAX_JSON_SIZE or info.file_size < 2:
             raise ValueError("AUDIT_INPUT_UNCOMPRESSED_TOO_LARGE")
+        if not info.compress_size or (info.file_size > 1024 * 1024
+                                     and info.file_size > info.compress_size * 500):
+            raise ValueError("AUDIT_INPUT_COMPRESSION_RATIO_UNSAFE")
         data = json.loads(z.read(member).decode("utf-8"))
     if not isinstance(data, list) or len(data) > MAX_CANDIDATES:
         raise ValueError("AUDIT_INPUT_COUNT_INVALID")
@@ -156,7 +170,11 @@ def triage(records: list[dict], tier: str, inventory_hosts: set[str] | None = No
         previous = seen.get(host)
         if previous:
             dropped_duplicate += 1
-            if (priority, host) >= (previous[0], host):
+            was_blocked = previous[1] in HARD_VETO_LABELS
+            is_blocked = label in HARD_VETO_LABELS
+            if was_blocked:
+                continue
+            if not is_blocked and priority >= previous[0]:
                 continue
         seen[host] = (priority, label, row)
     groups = Counter(label for _, label, _ in seen.values())
@@ -183,7 +201,8 @@ def triage(records: list[dict], tier: str, inventory_hosts: set[str] | None = No
 
 def write_private(path: Path, content: str) -> None:
     # Plaintext queue MUST be inaccessible to other OS users, never sent to CI.
-    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_EXCL |
+                 getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
         f.write(content)
 
