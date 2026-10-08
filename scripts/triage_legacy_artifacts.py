@@ -135,20 +135,43 @@ def inspect_archive(archive: Path) -> tuple[list[dict], str, str]:
 def load_existing_inventory(archive: Path | None) -> tuple[set[str], str | None]:
     if archive is None:
         return set(), None
+    target = "us-precompliance-inventory-export.csv"
+    manifest_name = "us-precompliance-inventory-export-manifest.json"
     with zipfile.ZipFile(archive) as z:
-        target = "us-precompliance-inventory-export.csv"
-        manifest_name = "us-precompliance-inventory-export-manifest.json"
-        if target not in z.namelist() or manifest_name not in z.namelist():
-            raise ValueError("INVENTORY_EXPORT_OR_MANIFEST_MISSING")
+        if z.namelist().count(target) != 1 or z.namelist().count(manifest_name) != 1:
+            raise ValueError("INVENTORY_EXPORT_OR_MANIFEST_DUPLICATE_OR_MISSING")
+        data_info = z.getinfo(target)
+        manifest_info = z.getinfo(manifest_name)
+        if (data_info.file_size > 32 * 1024 * 1024 or
+            manifest_info.file_size > 64 * 1024 or
+            data_info.file_size < 20 or manifest_info.file_size < 2):
+            raise ValueError("INVENTORY_ARCHIVE_SIZE_INVALID")
+        for info in (data_info, manifest_info):
+            if not info.compress_size or (info.file_size > 1024 * 1024
+                   and info.file_size > info.compress_size * 500):
+                raise ValueError("INVENTORY_COMPRESSION_RATIO_UNSAFE")
         data = z.read(target)
         manifest = json.loads(z.read(manifest_name).decode("utf-8"))
-    if hashlib.sha256(data).hexdigest() != manifest.get("csvSha256"):
+    if not isinstance(manifest, dict):
+        raise ValueError("INVENTORY_MANIFEST_INVALID")
+    digest = manifest.get("csvSha256")
+    count = manifest.get("uniqueDomains")
+    release = manifest.get("release")
+    if (not isinstance(digest, str) or
+        not re.fullmatch(r"[0-9a-f]{64}", digest) or
+        type(count) is not int or count < 0 or count > MAX_CANDIDATES or
+        not isinstance(release, str) or not RELEASE_RE.fullmatch(release)):
+        raise ValueError("INVENTORY_MANIFEST_INVALID")
+    if hashlib.sha256(data).hexdigest() != digest:
         raise ValueError("INVENTORY_SHA256_MISMATCH")
-    rows = csv.DictReader(io.StringIO(data.decode("utf-8-sig")))
-    hosts = {h for row in rows if (h := canonical_host(row))}
-    if len(hosts) != manifest.get("uniqueDomains"):
+    reader = csv.DictReader(io.StringIO(data.decode("utf-8-sig")))
+    if not reader.fieldnames or not ("normalized_domain" in reader.fieldnames or
+                                     "normalizedDomain" in reader.fieldnames):
+        raise ValueError("INVENTORY_CSV_SCHEMA_INVALID")
+    hosts = {h for row in reader if (h := canonical_host(row))}
+    if len(hosts) != count:
         raise ValueError("INVENTORY_ROW_COUNT_MISMATCH")
-    return hosts, manifest.get("csvSha256")
+    return hosts, digest
 
 
 def triage(records: list[dict], tier: str, inventory_hosts: set[str] | None = None):
