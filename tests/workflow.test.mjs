@@ -21,6 +21,12 @@ test('public workflows only run software tests; never execute live business scra
     assert.match(yaml,/permissions:\n  contents: read/);
     if(/pull_request:\s*/.test(yaml))assert.match(yaml,/head\.repo\.full_name == github\.repository/);
     assert.doesNotMatch(yaml,/--mode live|discover_overture\.py|upload-artifact|ENABLE_NETWORK_AUDIT/);
+    const actions=[...yaml.matchAll(/^\s*-\s*uses:\s*([^\s#]+)/gm)].map(x=>x[1]);
+    assert.equal(actions.length,2);
+    assert.match(actions[0],/^actions\/checkout@[0-9a-f]{40}$/);
+    assert.match(actions[1],/^actions\/setup-node@[0-9a-f]{40}$/);
+    assert.doesNotMatch(yaml,/uses:\s+[^\s#]+@v\d+/);
+
   }
 });
 
