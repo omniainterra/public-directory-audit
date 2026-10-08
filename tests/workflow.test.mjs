@@ -17,8 +17,9 @@ test('public workflows only run software tests; never execute live business scra
     const yaml=fs.readFileSync(path.join(dir,item),'utf8');
     assert.match(yaml,/runs-on: ubuntu-24\.04/);
     assert.match(yaml,/github\.event\.repository\.private == false/);
-    assert.doesNotMatch(yaml,/self-hosted|\bschedule:|\bcron:|OPENAI_API_KEY|DATABASE_URL|SENDGRID_API_KEY|pull_request:\s*/i);
+    assert.doesNotMatch(yaml,/self-hosted|\bschedule:|\bcron:|OPENAI_API_KEY|DATABASE_URL|SENDGRID_API_KEY|pull_request_target:\s*/i);
     assert.match(yaml,/permissions:\n  contents: read/);
+    if(/pull_request:\s*/.test(yaml))assert.match(yaml,/head\.repo\.full_name == github\.repository/);
     assert.doesNotMatch(yaml,/--mode live|discover_overture\.py|upload-artifact|ENABLE_NETWORK_AUDIT/);
   }
 });

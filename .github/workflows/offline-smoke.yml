@@ -1,6 +1,16 @@
 name: Offline source and security tests
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'bin/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'migrations/**'
+      - 'package.json'
+      - '.github/workflows/offline-smoke.yml'
   push:
     branches: [main]
     paths:
@@ -8,6 +18,7 @@ on:
       - 'bin/**'
       - 'scripts/**'
       - 'tests/**'
+      - 'migrations/**'
       - 'package.json'
       - '.github/workflows/offline-smoke.yml'
 permissions:
@@ -17,7 +28,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   safe-offline-check:
-    if: github.event.repository.private == false
+    if: github.event.repository.private == false && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -30,7 +41,7 @@ jobs:
       - name: Offline unit and transport guard tests only
         run: node --test tests/*.test.mjs
       - name: Offline legacy artifact triage tests (synthetic records only)
-        run: python3 -m unittest discover -s tests -p "test_legacy_*.py" -v
+        run: python3 -m unittest discover -s tests -p "test_*.py" -v
       - name: Offline encrypted fixture generation only
         run: node bin/pipeline.mjs --mode smoke --input examples/synthetic-candidates.jsonl --output sealed-report.json --limit 10
       - name: Verify plaintext input is never in the public artifact
