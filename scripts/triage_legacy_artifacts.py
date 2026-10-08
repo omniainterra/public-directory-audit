@@ -95,7 +95,9 @@ def classify(status: str, is_eligible: bool) -> tuple[int, str]:
     """No status here ever constitutes SEND/READY eligibility."""
     if status in PERMANENT_RESTRICTIONS or status.startswith("TERMINAL_"):
         return (99, "EXPLICITLY_RESTRICTED_OR_TERMINAL")
-    if is_eligible:
+    if is_eligible or status == "SITE_FORM_ELIGIBLE_PRE_COMPLIANCE":
+        # Older checkpoint formats did not always include the boolean flag.
+        # The explicit preliminary classification still vetoes automatic rechecking.
         return (99, "ALREADY_PRECOMPLIANCE_CANDIDATE")
     if status in QUEUE_KIND:
         return QUEUE_KIND[status]
