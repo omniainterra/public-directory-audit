@@ -1,3 +1,4 @@
+import {MANUAL_DENY_DOMAINS} from './threats.mjs';
 import dns from 'node:dns/promises';
 import https from 'node:https';
 import {BlockList,isIP} from 'node:net';
@@ -52,10 +53,11 @@ export function parseCandidateUrl(raw){
 }
 export function isDeniedHost(host,denylist){
   const h=cleanHostname(host);
+  const all=denylist instanceof Set?denylist:new Set();
   if(!h)return true;
   const tokens=h.split('.');
   while(tokens.length>=2){
-    if(denylist.has(tokens.join('.')))return true;
+    if(MANUAL_DENY_DOMAINS.includes(tokens.join('.'))||all.has(tokens.join('.')))return true;
     tokens.shift();
   }
   return false;
@@ -108,6 +110,8 @@ export async function safeFetch(raw,{denylist=new Set(),timeoutMs=6500,maxBytes=
   const start=parseCandidateUrl(raw);
   if(!start)throw new Error('URL_UNSAFE');
   if(isDeniedHost(start.hostname,denylist))throw new Error('THREAT_LISTED');
+  if(!(denylist instanceof Set)||denylist.size<215||
+    !MANUAL_DENY_DOMAINS.every(x=>denylist.has(x)))throw new Error('THREAT_FEED_REQUIRED');
   let url=start;
   const visited=new Set();
   for(let i=0;i<=maxRedirects;i++){

@@ -3,7 +3,22 @@ const SOURCES=[
   {name:'PHISHING_DATABASE',url:'https://raw.githubusercontent.com/Phishing-Database/Phishing.Database/master/phishing-domains-ACTIVE.txt',min:100},
   {name:'URLHAUS',url:'https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-hosts-online.txt',min:10}
 ];
-const manual=['learningforlifecenter.org','heartlandmeditation.com','nafasfitness.com','roco2lab.com','covencle.com'];
+export const MANUAL_DENY_DOMAINS=Object.freeze([
+ 'learningforlifecenter.org','heartlandmeditation.com','nafasfitness.com',
+ 'roco2lab.com','covencle.com'
+]);
+export function validThreatSnapshot(snapshot,{now=Date.now()}={}){
+  if(!snapshot||!(snapshot.denylist instanceof Set)||snapshot.denylist.size<215||
+    typeof snapshot.checkedAt!=='string')return false;
+  const time=Date.parse(snapshot.checkedAt);
+  if(!Number.isFinite(time)||time>now+300000||now-time>86400000)return false;
+  const counts=snapshot.counts||{};
+  for(const [name,min] of [['CERT_PL',100],['PHISHING_DATABASE',100],['URLHAUS',10]]){
+    if(!Number.isInteger(counts[name])||counts[name]<min)return false;
+  }
+  return MANUAL_DENY_DOMAINS.every(x=>snapshot.denylist.has(x));
+}
+
 function hostFromLine(line){
   let s=String(line).trim().toLowerCase();
   if(!s||s.startsWith('#')||s.startsWith('!'))return null;
@@ -15,7 +30,7 @@ function hostFromLine(line){
   return s;
 }
 export async function loadThreats({fetchImpl=fetch}={}){
-  const set=new Set(manual);
+  const set=new Set(MANUAL_DENY_DOMAINS);
   const counts={manual:set.size};
   for(const source of SOURCES){
     const response=await fetchImpl(source.url,{redirect:'error',signal:AbortSignal.timeout(25000)});
@@ -43,5 +58,5 @@ export async function loadThreats({fetchImpl=fetch}={}){
     for(const host of discovered)set.add(host);
     counts[source.name]=discovered.size;
   }
-  return {denylist:set,counts};
+  return {denylist:set,counts,checkedAt:new Date().toISOString()};
 }
