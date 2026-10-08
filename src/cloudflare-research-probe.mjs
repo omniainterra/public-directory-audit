@@ -1,6 +1,27 @@
 // NOT IMPORTED BY THE PUBLIC WORKER. Offline-vetted single-site research prototype.
 // An operator must separately provision authentication, request quotas, and encrypted storage.
 const forbidden=['.localhost','.local','.internal','.test','.invalid','.example','.onion','.arpa','.workers.dev'];
+// These domains were blocked by the owner's endpoint security software.
+// They are excluded even if a public threat feed later stops listing them.
+const MANUAL_NEVER_FETCH=new Set([
+  'learningforlifecenter.org','heartlandmeditation.com','nafasfitness.com',
+  'roco2lab.com','covencle.com'
+]);
+export function verifiedThreatEvidence(snapshot,{now=Date.now()}={}){
+  // This is a *format / freshness gate*, NOT a cryptographic signature.
+  // A trusted operator must independently validate each downloaded source.
+  if(!snapshot||typeof snapshot!=='object'||!(snapshot.domains instanceof Set)||
+    snapshot.domains.size<215||typeof snapshot.validatedAt!=='string')return false;
+  const published=Date.parse(snapshot.validatedAt);
+  if(!Number.isFinite(published)||published>now+300000||now-published>86400000)return false;
+  const counts=snapshot.sourceCounts;
+  if(!counts||typeof counts!=='object')return false;
+  for(const [name,min] of [['CERT_PL',100],['PHISHING_DATABASE',100],['URLHAUS',10]]){
+    if(!Number.isInteger(counts[name])||counts[name]<min)return false;
+  }
+  for(const domain of MANUAL_NEVER_FETCH)if(!snapshot.domains.has(domain))return false;
+  return true;
+}
 function hostnameAllowed(host){
  const h=String(host||'').toLowerCase();
  if(!h||h.length>253||h==='localhost'||!h.includes('.')||forbidden.some(x=>h.endsWith(x)))return false;
@@ -153,13 +174,15 @@ function formsAndLinks(html,page,host){
   return {status:manual?'CONTACT_REQUIRES_MANUAL_REVIEW':'NO_CONTACT_DETECTED',links};
 }
 
-export async function auditAuthorizedSite({url,approvedHost,denylist=[],fetchImpl}={}){
+export async function auditAuthorizedSite({url,approvedHost,denylist=[],threatEvidence,fetchImpl,now=()=>Date.now()}={}){
  const host=String(approvedHost||'').toLowerCase();
  const initial=validate(url,host);
  if(!initial)return {status:'DENIED_INPUT',requests:0,sendAuthorized:false};
- if(denylist.some(x=>host===x||host.endsWith('.'+x)))return {status:'THREAT_DENIED',requests:0,sendAuthorized:false};
+ if([...MANUAL_NEVER_FETCH,...denylist].some(x=>host===x||host.endsWith('.'+x)))return {status:'THREAT_DENIED',requests:0,sendAuthorized:false};
  // No implicit network! Only an explicitly provided read-only transport is accepted.
  if(typeof fetchImpl!=='function')return {status:'NETWORK_DISABLED',requests:0,sendAuthorized:false};
+ if(!verifiedThreatEvidence(threatEvidence,{now:now()}))
+   return {status:'THREAT_FEED_UNAVAILABLE',requests:0,sendAuthorized:false};
  let requests=0;
  const result=(status)=>({status,requests,sendAuthorized:false});
  try{
