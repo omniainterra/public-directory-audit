@@ -25,6 +25,14 @@ test('credential creator is a single offline file with no remote imports, networ
   assert.doesNotMatch(js,/\b(?:fetch|XMLHttpRequest|WebSocket|sendBeacon|localStorage|sessionStorage|indexedDB|EventSource)\b/);
   assert.doesNotMatch(html,/ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}/);
 });
+test('trusted local credential generation does not demand Wi-Fi disconnection',()=>{
+  assert.doesNotMatch(html,/id="offline"/);
+  assert.doesNotMatch(html,/select\('offline'\)/);
+  assert.doesNotMatch(html,/インターネット接続を切断済み/);
+  assert.match(html,/id="trusted"/);
+  assert.match(html,/connect-src 'none'/);
+  assert.match(html,/window\.location\.protocol!=='file:'/);
+});
 test('WebCrypto RSA-3072 public/private key and strong bearer token are interoperable',async()=>{
   const app=evaluate();
   const bundle=await app.generateCredentials(webcrypto);
